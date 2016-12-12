@@ -16,7 +16,7 @@
 	function san_out(){
 		$username = $_POST["username"];
 		$result = db_query("SELECT id,password, salt FROM users WHERE username = ’$username’");
-		return $result = mysql_query($query); (/home/iberiam/Desktop/Grib/emoncms_1/emoncms_examples-master/feed01/includes/db.php);
+		return $result = mysql_query($query); (\\home\\iberiam\\Desktop\\Grib\\emoncms_1\\emoncms_examples-master\\feed01\\includes\\db.php);
 	}
 	
 	

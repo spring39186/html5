@@ -23,7 +23,9 @@ class ModelConfig:
     """各角色使用的模型（可用環境變數覆寫）"""
     planner: str = os.getenv("FA_PLANNER", "qwen3.6:35b-a3b")   # 中文意圖分析 + 路由
     executor: str = os.getenv("FA_EXECUTOR", "qwen3.6:35b-a3b")  # 工具決策（預設 Qwen，較穩；可改 gemma4:31b）
-    synthesizer: str = os.getenv("FA_SYNTHESIZER", "mesllm")  # 證據整合 + 統籌呈現（總結 agent）；實測中，懷疑底層為 gpt-oss-120b
+    synthesizer: str = os.getenv("FA_SYNTHESIZER", "gemma4:31b")  # 證據整合 + 統籌呈現（總結 agent）
+    # 註：曾試 mesllm（疑似 gpt-oss-120b），但 120B 反覆載入造成總結逾時，故不用。
+    #     改用 gemma4:31b（密集、載入快）。若覺得繁中略弱，可 FA_SYNTHESIZER=qwen3.6:27b。
     coder: str = os.getenv("FA_CODER", "qwen3.6:27b")           # 程式碼生成 / 翻譯
     vision: str = os.getenv("FA_VISION", "glm-ocr")             # PDF / 圖片 OCR
     chat: str = os.getenv("FA_CHAT", "mesllm")                  # 一般聊天
@@ -40,6 +42,12 @@ class RuntimeConfig:
     tools_path: str = os.getenv("FA_TOOLS_PATH", "AgentTools.json")
     max_steps: int = int(os.getenv("FA_MAX_STEPS", "12"))
     code_timeout: int = int(os.getenv("FA_CODE_TIMEOUT", "60"))
+    # 單次 LLM 請求逾時（秒）。超過就放棄該次呼叫並走降級，避免整個 app 卡死。
+    request_timeout: int = int(os.getenv("FA_REQUEST_TIMEOUT", "240"))
+    # 餵給總結 agent 的證據總長度上限（字元），避免輸入過大導致超慢。
+    max_evidence_chars: int = int(os.getenv("FA_MAX_EVIDENCE_CHARS", "12000"))
+    # OCR 正規化語言："" 關閉；"en" 解析後把每頁譯成英文再入庫（跨多國語言文件用）。
+    normalize_lang: str = os.getenv("FA_NORMALIZE_LANG", "")
     # confidence 門檻：高於此值才允許走 fast-path 直接回答
     fastpath_confidence: float = float(os.getenv("FA_FASTPATH_CONF", "0.7"))
 

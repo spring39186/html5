@@ -172,7 +172,8 @@ def _extract_json(text: str) -> dict:
 
 
 def _chat(model: str, messages: list, temperature: float = 0.2, **kw) -> str:
-    """單輪文字呼叫，集中錯誤處理。"""
+    """單輪文字呼叫，集中錯誤處理。預設帶請求逾時，避免卡死整個流程。"""
+    kw.setdefault("timeout", RUNTIME.request_timeout)
     resp = client.chat.completions.create(
         model=model, messages=messages, temperature=temperature, **kw
     )
@@ -343,6 +344,26 @@ def _cache_path(pdf_path: str) -> str:
     return os.path.join(RUNTIME.cache_dir, f"{os.path.basename(pdf_path)}.md")
 
 
+def _normalize_to_english(full_text: str) -> str:
+    """把多語言 OCR 內容逐頁翻成英文（保留表格/數字/結構），統一語言以利檢索與整合。"""
+    sys = ("You are a professional financial translator. Translate the following report page "
+           "into English. Keep ALL numbers, dates and markdown tables EXACTLY as-is; only "
+           "translate surrounding text and labels. Output only the translation, no commentary.")
+    out = []
+    for sec in full_text.split("\n\n---\n\n"):
+        if len(sec.strip()) < 20:
+            out.append(sec)
+            continue
+        try:
+            out.append(_chat(MODEL_CONFIG.coder,
+                             [{"role": "system", "content": sys},
+                              {"role": "user", "content": sec}],
+                             temperature=0.1))
+        except Exception:  # noqa: BLE001
+            out.append(sec)  # 翻譯失敗保留原文
+    return "\n\n---\n\n".join(out)
+
+
 def parse_financial_pdf(args: dict, file_registry: dict) -> str:
     """PDF 全頁 OCR → Markdown → 向量化入庫。"""
     file_name = args.get("file_name")
@@ -393,6 +414,19 @@ def parse_financial_pdf(args: dict, file_registry: dict) -> str:
         doc.close()
         with open(cache_file, "w", encoding="utf-8") as f:
             f.write(full_text)
+
+    # 選用：統一翻成英文再入庫（跨多國語言文件，提升檢索與整合一致性）
+    if RUNTIME.normalize_lang == "en":
+        norm_cache = cache_file + ".en.md"
+        if os.path.exists(norm_cache):
+            print(f"🔄 [Norm Cache] {norm_cache}")
+            with open(norm_cache, "r", encoding="utf-8") as f:
+                full_text = f.read()
+        else:
+            print(f"🌐 [Normalize→EN] 正在統一語言: {file_name} ...")
+            full_text = _normalize_to_english(full_text)
+            with open(norm_cache, "w", encoding="utf-8") as f:
+                f.write(full_text)
 
     # 切塊
     print(f"📚 [Vectorizing] {file_name} ...")
@@ -761,8 +795,13 @@ def build_gather_system_prompt(plan: PlanningResult, file_list: str) -> str:
 1. 有上傳檔案：先對每個檔案 parse_financial_pdf（若未解析）→ 再 search_knowledge_base 撈具體數值。
 2. 跨檔案：對「每個檔案」分別 search_knowledge_base，指定 file_name。
 3. 需要歷史資料庫：先 get_database_schema 看結構 → 再 run_sql_query 產生 SELECT 取數。
-4. 把使用者問題需要的所有面向都查齊（例如同時要營收與EPS，兩者都要撈）。
-5. 證據撈足後，直接回覆「收集完成」即可，不要長篇大論。
+4. 【關鍵：精準檢索】不要把多個指標、多種語言塞進同一個 search_query（會讓檢索失焦）。
+   請「一個指標一次查詢」，並用「該檔案原文語言」的正式用語：
+   - 營收：中文檔用「營業收入 綜合收益總額」、英文檔用「revenue net sales」、日文檔用「売上収益」
+   - 淨利：中文「母公司擁有人應佔溢利」、英文「profit attributable to owners」、日文「親会社の所有者に帰属する当期利益」
+   - 也務必查「合併財務摘要 / Consolidated Results / 連結業績」這類彙總表，數字通常在那裡。
+5. 每個檔案的每個關鍵指標都要確認有撈到「實際數值」；若某指標沒撈到，換用語再查一次。
+6. 證據撈足後，直接回覆「收集完成」即可，不要長篇大論。
 
 【已上傳檔案】
 {file_list}
@@ -817,7 +856,8 @@ def _gather_evidence(plan: PlanningResult, user_prompt: str,
     for step in range(1, RUNTIME.max_steps + 1):
         print(f"\n  [Gather {step}/{RUNTIME.max_steps}]")
         try:
-            params = {"model": MODEL_CONFIG.executor, "messages": messages, "temperature": 0.1}
+            params = {"model": MODEL_CONFIG.executor, "messages": messages,
+                      "temperature": 0.1, "timeout": RUNTIME.request_timeout}
             if tools:
                 params["tools"] = tools
                 params["tool_choice"] = "auto"
@@ -860,7 +900,7 @@ def _gather_evidence(plan: PlanningResult, user_prompt: str,
             # 解析類訊息（如「已完成解析」）不算證據，檢索/SQL 結果才收進證據
             if func_name in ("search_knowledge_base", "run_sql_query") or "查詢成功" in result_str:
                 evidence.append(f"【{func_name}｜{args.get('search_query') or args.get('sql') or ''}】\n"
-                                f"{_preview(result_str, 4000)}")
+                                f"{_preview(result_str, 2500)}")
 
             _trace(resp, "tool_call", step=step, tool=func_name,
                    thought=args.get("thought_process"),
@@ -884,14 +924,20 @@ def _synthesize(user_prompt: str, plan: PlanningResult,
     else:
         evidence_text = "（收集階段沒有取得任何證據，請在報告中說明資料不足。）"
 
+    # 限制證據總長度，避免輸入過大讓總結模型超慢/逾時
+    if len(evidence_text) > RUNTIME.max_evidence_chars:
+        evidence_text = evidence_text[:RUNTIME.max_evidence_chars] + "\n…（證據過長已截斷）"
+
     user_block = (f"【使用者需求】\n{user_prompt}\n\n"
                   f"【收集到的證據】\n{evidence_text}\n\n"
                   "請整合以上證據，輸出 JSON（report / charts / tables）。")
 
     t0 = time.perf_counter()
+    used_model = MODEL_CONFIG.synthesizer
+    raw = ""
     try:
         raw = _chat(
-            MODEL_CONFIG.synthesizer,
+            used_model,
             [{"role": "system", "content": SYNTHESIS_SYSTEM_PROMPT},
              {"role": "user", "content": user_block}],
             temperature=0.2,
@@ -901,11 +947,25 @@ def _synthesize(user_prompt: str, plan: PlanningResult,
         charts = data.get("charts", []) or []
         tables = data.get("tables", []) or []
     except Exception as e:  # noqa: BLE001
-        # JSON 解析失敗：把原始輸出當報告，至少不漏掉內容
-        print(f"⚠️ 整合 JSON 解析失敗，降級為純文字報告: {e}")
-        report, charts, tables = (raw if 'raw' in dir() else f"整合失敗: {e}"), [], []
+        # 逾時或其他錯誤：用 executor（通常已在 VRAM、較快）重試一次，產出純文字報告
+        print(f"⚠️ 總結失敗（{e}），改用 executor 降級重試...")
+        _trace(resp, "synthesis_fallback", error=str(e), from_model=used_model)
+        used_model = MODEL_CONFIG.executor
+        try:
+            report = _chat(
+                used_model,
+                [{"role": "system", "content":
+                  "你是財務分析師。根據以下證據，用繁體中文寫一份連貫的分析報告，只用證據中的真實數據，"
+                  "不要捏造，不需輸出 JSON。"},
+                 {"role": "user", "content": user_block}],
+                temperature=0.2,
+            )
+        except Exception as e2:  # noqa: BLE001
+            report = (f"⚠️ 整合階段逾時，無法完成報告（{e2}）。\n\n"
+                      f"以下為收集到的原始證據摘要：\n\n{_preview(evidence_text, 3000)}")
+        charts, tables = [], []
 
-    _trace(resp, "synthesis", model=MODEL_CONFIG.synthesizer,
+    _trace(resp, "synthesis", model=used_model,
            duration_ms=round((time.perf_counter() - t0) * 1000, 1),
            report_text=_preview(report, 2000),
            chart_count=len(charts), table_count=len(tables))

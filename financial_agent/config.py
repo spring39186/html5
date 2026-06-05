@@ -23,7 +23,7 @@ class ModelConfig:
     """各角色使用的模型（可用環境變數覆寫）"""
     planner: str = os.getenv("FA_PLANNER", "qwen3.6:35b-a3b")   # 中文意圖分析 + 路由
     executor: str = os.getenv("FA_EXECUTOR", "qwen3.6:35b-a3b")  # 工具決策（預設 Qwen，較穩；可改 gemma4:31b）
-    synthesizer: str = os.getenv("FA_SYNTHESIZER", "qwen3.6:35b-a3b")  # 證據整合 + 統籌呈現（總結 agent）
+    synthesizer: str = os.getenv("FA_SYNTHESIZER", "mesllm")  # 證據整合 + 統籌呈現（總結 agent）；實測中，懷疑底層為 gpt-oss-120b
     coder: str = os.getenv("FA_CODER", "qwen3.6:27b")           # 程式碼生成 / 翻譯
     vision: str = os.getenv("FA_VISION", "glm-ocr")             # PDF / 圖片 OCR
     chat: str = os.getenv("FA_CHAT", "mesllm")                  # 一般聊天

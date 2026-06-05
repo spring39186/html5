@@ -15,11 +15,13 @@
    ┌────┼─────────────┬──────────────┬───────────────┐
    ▼    ▼             ▼              ▼               ▼
  chat  financial_qa  translation   visualization   file_analysis / 其他
- (chat) (executor)   (coder)       (coder→沙箱)     (Phase 3 tool loop)
-                                                        │
+ (chat) (executor)   (coder)       (coder→沙箱)         │
                                                         ▼
-                                            [Phase 3] Executor tool loop
-                                            （PDF 解析 → 向量檢索 → 回答）
+                              [Phase 3] 多 agent 協作管線：
+                              收集 agent（OCR/檢索/SQL 撈證據）
+                                 → 總結 agent（整合成連貫報告 + 指定圖表）
+                                 → Coder agent（依指定畫圖）
+                                 → 一起呈現（報告 + 表格 + 圖表，由總結者統籌）
 
 關鍵優化（相對原版）：
 1. 視覺化改為「確定性路徑」：intent=visualization 直接指定 Coder 生成繪圖碼，
@@ -671,73 +673,110 @@ def handle_visualize(user_prompt: str, plan: PlanningResult) -> dict:
 
 
 # ============================================================
-# Phase 3: Executor 工具迴圈
+# Phase 3: Gather（收集證據）→ Synthesize（整合統籌）→ Visualize（畫圖）→ Present
 # ============================================================
-def build_execution_system_prompt(plan: PlanningResult, file_list: str) -> str:
-    return f"""【前置規劃（由 Qwen Planner 提供）】
+# 設計理念（回應「流程死版、缺乏一致性」）：
+#   舊版：executor 邊查邊講，最後一句話當報告，圖表臨時起意 → 敘述與圖各做各的。
+#   新版：先讓「收集 agent」把 OCR/檢索/SQL 的證據全部撈齊；
+#         再由「總結 agent」統一整合成連貫報告，並明確指定要畫哪些圖（附真實數據）；
+#         最後「Coder agent」依指定繪圖；報告與圖表由同一個總結者統籌，保證一致性。
+
+# 收集階段只開放「取得數據」的工具，避免它自己亂畫圖或提早下結論
+_GATHER_TOOL_NAMES = {
+    "parse_financial_pdf", "search_knowledge_base",
+    "get_database_schema", "run_sql_query",
+}
+
+
+def _gather_tools() -> List[dict]:
+    names = _GATHER_TOOL_NAMES | MCP_TOOL_NAMES
+    return [t for t in AGENT_TOOLS if t.get("function", {}).get("name") in names]
+
+
+def build_gather_system_prompt(plan: PlanningResult, file_list: str) -> str:
+    return f"""【前置規劃（由 Planner 提供）】
 - 意圖: {plan.intent.value}
 - 步驟: {' → '.join(plan.steps)}
-- 首要工具: {plan.first_tool or '無'}
 - 推理: {plan.reasoning}
-- 信心: {plan.confidence}
 - 跨檔案: {'是' if plan.is_multi_file else '否'}
 
-【你的角色】執行協調者。使用者的要求可能「一句話含多個任務」（例如：分析＋統計＋畫圖），
-你必須**逐項完成全部任務**，不可只做最後一項。請依序多次呼叫工具，直到所有子任務都完成。
+【你的角色：資料收集員】
+你的「唯一任務」是把回答使用者所需的**原始證據/數據**用工具撈齊，
+不需要做最終分析、不需要畫圖、不需要寫結論——那是下一棒（總結者）的工作。
 
-【標準流程：分析上傳檔案 + 統計 + 畫圖】
-1. 對每個上傳檔案呼叫 parse_financial_pdf 解析（若尚未解析）。
-2. 對每個檔案呼叫 search_knowledge_base，撈出需要的具體數值（如各年度營收、EPS）。
-3. 用文字整理／統計這些「真實數值」（例如成長率、平均）。
-4. 需要圖表時才呼叫 run_python_code，並且**務必把上一步撈到的真實數據直接寫進 thought_process
-   或 code**（例如把 years=[2023,2024,2025]、revenue=[...] 明確列出）。
-5. 最後輸出一段完整文字報告（統計結論），圖表會自動附在下方。
-
-【其他規則】
-- 跨檔案分析：對「每個檔案」分別呼叫 search_knowledge_base，並指定 file_name。
-- 查歷史財務資料庫：先 get_database_schema 看結構 → 再 run_sql_query 產生並執行 SELECT。
-  這是最後手段，只在「使用者明確要求查資料庫」或「上傳檔案查無數據」時使用。
-  SQL 失敗時，依錯誤訊息與 schema 修正後重試。
+【收集規則】
+1. 有上傳檔案：先對每個檔案 parse_financial_pdf（若未解析）→ 再 search_knowledge_base 撈具體數值。
+2. 跨檔案：對「每個檔案」分別 search_knowledge_base，指定 file_name。
+3. 需要歷史資料庫：先 get_database_schema 看結構 → 再 run_sql_query 產生 SELECT 取數。
+4. 把使用者問題需要的所有面向都查齊（例如同時要營收與EPS，兩者都要撈）。
+5. 證據撈足後，直接回覆「收集完成」即可，不要長篇大論。
 
 【已上傳檔案】
 {file_list}
 
 【絕對禁止】
-- 只完成多任務中的一項就停手（例如只畫圖卻沒做統計分析）。
-- 呼叫 run_python_code 畫圖時，讓繪圖工具自己假設/模擬數據。
-  你必須提供從檔案實際檢索到的數字；沒有真實數字就不要畫圖。
-- 有上傳檔案時跳過 parse_financial_pdf 直接查資料庫。
-- 捏造檔案中不存在的數據。
-- 回覆務必使用繁體中文。"""
+- 捏造任何檔案/資料庫中不存在的數據。
+- 有上傳檔案時跳過 parse_financial_pdf。"""
 
 
-def _execute_tool_loop(plan: PlanningResult, user_prompt: str,
-                       file_registry: dict, resp: AgentResponse) -> None:
+SYNTHESIS_SYSTEM_PROMPT = """你是首席財務分析師（總結整合 agent）。
+你會收到使用者的原始需求，以及前一階段透過 OCR／向量檢索／SQL 收集到的所有「證據」。
+
+【你的任務】
+1. 整合所有證據，產出一份連貫、專業、結構清楚的繁體中文分析報告。
+2. 自行判斷哪些結果適合視覺化，並把要畫的圖「明確指定」出來（附上實際數據）。
+3. 需要結構化表格時，也一併指定。
+
+【鐵則】
+- 只能使用證據中實際出現的數據，嚴禁捏造、臆測或自行假設數字。
+- 若證據不足以回答某部分，在報告中誠實說明「資料不足」，不要硬湊。
+- 圖表/表格的 data 必須是從證據抽出的真實數值。
+
+【輸出格式】只輸出有效 JSON：
+{
+  "report": "完整 Markdown 分析報告（繁體中文）。可在文中提到下方圖表。",
+  "charts": [
+    {
+      "title": "圖表標題",
+      "chart_type": "line | bar | pie",
+      "description": "這張圖要呈現什麼",
+      "data": [ {"label/年度...": 值, ...}, ... ]
+    }
+  ],
+  "tables": [
+    { "title": "表格標題", "data": [ {"欄位": 值, ...}, ... ] }
+  ]
+}
+- 不需要圖表時，charts 給空陣列 []；不需要表格時，tables 給空陣列 []。"""
+
+
+def _gather_evidence(plan: PlanningResult, user_prompt: str,
+                     file_registry: dict, resp: AgentResponse) -> List[str]:
+    """收集階段：跑工具迴圈撈證據，回傳證據字串清單。"""
     file_list = "\n".join(f"- {n}" for n in file_registry) if file_registry else "無"
     messages = [
-        {"role": "system", "content": build_execution_system_prompt(plan, file_list)},
+        {"role": "system", "content": build_gather_system_prompt(plan, file_list)},
         {"role": "user", "content": user_prompt},
     ]
+    tools = _gather_tools()
+    evidence: List[str] = []
 
     for step in range(1, RUNTIME.max_steps + 1):
-        print(f"\n  [Step {step}/{RUNTIME.max_steps}]")
+        print(f"\n  [Gather {step}/{RUNTIME.max_steps}]")
         try:
             params = {"model": MODEL_CONFIG.executor, "messages": messages, "temperature": 0.1}
-            if AGENT_TOOLS:
-                params["tools"] = AGENT_TOOLS
+            if tools:
+                params["tools"] = tools
                 params["tool_choice"] = "auto"
             api_resp = client.chat.completions.create(**params)
         except Exception as e:  # noqa: BLE001
-            resp.report_text = f"❌ API 呼叫失敗: {e}"
-            return
+            _trace(resp, "gather_error", error=str(e))
+            break
 
         msg = api_resp.choices[0].message
-        if msg.content:
-            resp.report_text = msg.content
         if not msg.tool_calls:
-            print("  └─ 完成（無更多工具呼叫）")
-            _trace(resp, "final", step=step, report_text=_preview(resp.report_text, 2000))
-            return
+            print("  └─ 收集完成")
+            break
 
         messages.append(msg)
         for tc in msg.tool_calls:
@@ -746,8 +785,7 @@ def _execute_tool_loop(plan: PlanningResult, user_prompt: str,
                 args = json.loads(tc.function.arguments or "{}")
             except json.JSONDecodeError:
                 args = {}
-            print(f"  ├─ 呼叫工具: {func_name}")
-
+            print(f"  ├─ 收集工具: {func_name}")
             if "thought_process" in args:
                 resp.thought_logs.append(
                     {"tool": func_name, "step": step, "thought": args["thought_process"]}
@@ -756,32 +794,117 @@ def _execute_tool_loop(plan: PlanningResult, user_prompt: str,
             t0 = time.perf_counter()
             try:
                 result = dispatch_tool(func_name, args, file_registry, resp.thought_logs)
-                if func_name == "run_python_code" and isinstance(result, dict):
-                    if result.get("plot"):
-                        resp.images.append(result["plot"])
-                    # 把生成的程式碼也記進 trace，方便事後檢查繪圖品質
-                    _trace(resp, "generated_code", step=step,
-                           code=_preview(result.get("code", ""), 2000))
-                    result = result.get("output", "")
-                elif func_name == "generate_financial_table" and not str(result).startswith("❌"):
-                    resp.tables.append(result)
-                    result = f"✅ 表格已生成：{args.get('title')}"
             except Exception as e:  # noqa: BLE001
                 result = f"⚠️ 工具執行錯誤: {e}"
             duration_ms = round((time.perf_counter() - t0) * 1000, 1)
 
+            result_str = str(result)
+            # 解析類訊息（如「已完成解析」）不算證據，檢索/SQL 結果才收進證據
+            if func_name in ("search_knowledge_base", "run_sql_query") or "查詢成功" in result_str:
+                evidence.append(f"【{func_name}｜{args.get('search_query') or args.get('sql') or ''}】\n"
+                                f"{_preview(result_str, 4000)}")
+
             _trace(resp, "tool_call", step=step, tool=func_name,
                    thought=args.get("thought_process"),
                    args={k: v for k, v in args.items() if k != "thought_process"},
-                   result_preview=_preview(result), duration_ms=duration_ms)
+                   result_preview=_preview(result_str), duration_ms=duration_ms)
 
             messages.append({
                 "role": "tool", "tool_call_id": tc.id,
-                "name": func_name, "content": str(result),
+                "name": func_name, "content": result_str,
             })
 
-    resp.report_text += "\n\n⚠️ 已達最大執行步驟，任務中斷。"
-    _trace(resp, "max_steps_reached", step=RUNTIME.max_steps)
+    _trace(resp, "gather_done", evidence_count=len(evidence))
+    return evidence
+
+
+def _synthesize(user_prompt: str, plan: PlanningResult,
+                evidence: List[str], resp: AgentResponse) -> dict:
+    """整合階段：總結 agent 把證據整合成報告 + 圖表/表格指定（JSON）。"""
+    if evidence:
+        evidence_text = "\n\n========\n\n".join(evidence)
+    else:
+        evidence_text = "（收集階段沒有取得任何證據，請在報告中說明資料不足。）"
+
+    user_block = (f"【使用者需求】\n{user_prompt}\n\n"
+                  f"【收集到的證據】\n{evidence_text}\n\n"
+                  "請整合以上證據，輸出 JSON（report / charts / tables）。")
+
+    t0 = time.perf_counter()
+    try:
+        raw = _chat(
+            MODEL_CONFIG.synthesizer,
+            [{"role": "system", "content": SYNTHESIS_SYSTEM_PROMPT},
+             {"role": "user", "content": user_block}],
+            temperature=0.2,
+        )
+        data = _extract_json(raw)
+        report = data.get("report", "").strip() or raw.strip()
+        charts = data.get("charts", []) or []
+        tables = data.get("tables", []) or []
+    except Exception as e:  # noqa: BLE001
+        # JSON 解析失敗：把原始輸出當報告，至少不漏掉內容
+        print(f"⚠️ 整合 JSON 解析失敗，降級為純文字報告: {e}")
+        report, charts, tables = (raw if 'raw' in dir() else f"整合失敗: {e}"), [], []
+
+    _trace(resp, "synthesis", model=MODEL_CONFIG.synthesizer,
+           duration_ms=round((time.perf_counter() - t0) * 1000, 1),
+           report_text=_preview(report, 2000),
+           chart_count=len(charts), table_count=len(tables))
+    return {"report": report, "charts": charts, "tables": tables}
+
+
+def _render_chart(spec: dict, resp: AgentResponse) -> None:
+    """視覺化階段：把總結者指定的單張圖交給 Coder 生成並執行。"""
+    title = spec.get("title", "圖表")
+    chart_type = spec.get("chart_type", "")
+    description = spec.get("description", "")
+    data = spec.get("data", [])
+    data_json = json.dumps(data, ensure_ascii=False)
+
+    task = (f"請畫一張「{chart_type or '適當類型'}」圖：{title}。\n"
+            f"需求說明：{description}\n"
+            f"務必只用以下實際數據（不可更改、不可捏造、不可新增資料點）：\n{data_json}")
+
+    print(f"  🎨 [Coder] 繪製: {title}")
+    result = run_python_code({"thought_process": task, "code": ""}, {})
+    _trace(resp, "chart", title=title, chart_type=chart_type,
+           code=_preview(result.get("code", ""), 2000),
+           output=_preview(result.get("output", "")))
+    if result.get("plot"):
+        resp.images.append(result["plot"])
+
+
+def _execute_tool_loop(plan: PlanningResult, user_prompt: str,
+                       file_registry: dict, resp: AgentResponse) -> None:
+    """統籌三階段：收集 → 整合 → 視覺化/表格 → 一起呈現。"""
+    # 1) 收集證據
+    evidence = _gather_evidence(plan, user_prompt, file_registry, resp)
+
+    # 2) 總結 agent 整合
+    print("\n  🧩 [Synthesize] 總結 agent 整合證據...")
+    synthesis = _synthesize(user_prompt, plan, evidence, resp)
+    resp.report_text = synthesis["report"]
+
+    # 3) 表格（由總結者指定）
+    for tbl in synthesis.get("tables", []):
+        try:
+            html = generate_financial_table(
+                {"data_json": json.dumps(tbl.get("data", []), ensure_ascii=False),
+                 "title": tbl.get("title", "表格")}, file_registry)
+            if not str(html).startswith("❌"):
+                resp.tables.append(html)
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠️ 表格生成失敗: {e}")
+
+    # 4) 視覺化（總結者指派給 Coder）
+    for chart in synthesis.get("charts", []):
+        try:
+            _render_chart(chart, resp)
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠️ 圖表生成失敗: {e}")
+
+    _trace(resp, "present", tables=len(resp.tables), images=len(resp.images))
 
 
 # ============================================================
@@ -843,7 +966,8 @@ def run_financial_agent(user_prompt: str, file_registry: dict = None) -> dict:
                code=_preview(result.get("code", ""), 2000),
                output=_preview(result.get("output", "")))
     else:  # execute_tools
-        print("\n" + "=" * 60 + "\n⚙️ [Phase 3] Executor 工具執行\n" + "=" * 60)
+        print("\n" + "=" * 60 +
+              "\n⚙️ [Phase 3] 收集 → 整合 → 視覺化 → 呈現\n" + "=" * 60)
         _execute_tool_loop(plan, user_prompt, file_registry, resp)
 
     _trace(resp, "done", total_ms=round((time.perf_counter() - t_start) * 1000, 1),

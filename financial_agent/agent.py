@@ -73,6 +73,10 @@ collection = chroma_client.get_or_create_collection(
 
 os.makedirs(RUNTIME.cache_dir, exist_ok=True)
 
+# MCP 橋接（agent 當 MCP client）。預設關閉，FA_USE_MCP=1 才啟用。
+MCP_BRIDGE = None
+MCP_TOOL_NAMES: set = set()
+
 
 class IntentType(str, Enum):
     CHAT = "chat"
@@ -607,6 +611,12 @@ def dispatch_tool(func_name: str, args: dict, file_registry: dict, thought_logs:
         if not has_parsed:
             return ("❌ 系統攔截：目前有上傳檔案，請先 parse_financial_pdf + "
                     "search_knowledge_base 從檔案找答案。確實查無時才查資料庫。")
+
+    # MCP 工具：轉發給 MCP server（資料庫查詢走這條）
+    if func_name in MCP_TOOL_NAMES and MCP_BRIDGE is not None:
+        print(f"   └─ 經 MCP 轉發: {func_name}")
+        return MCP_BRIDGE.call_tool(func_name, args)
+
     fn = TOOL_DISPATCH.get(func_name)
     if fn:
         return fn(args, file_registry)
@@ -914,6 +924,39 @@ _DEFAULT_TOOLS = [
 ]
 
 AGENT_TOOLS = load_tools_schema()
+
+
+# ============================================================
+# MCP 初始化：把 MCP server 的工具併入 AGENT_TOOLS（同名則由 MCP 接管）
+# ============================================================
+def init_mcp() -> None:
+    """若 FA_USE_MCP=1，連線 MCP server 並把其工具併入 agent 可用工具。"""
+    global AGENT_TOOLS, MCP_BRIDGE, MCP_TOOL_NAMES
+    if not RUNTIME.use_mcp:
+        return
+    try:
+        import mcp_client
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠️ 無法載入 mcp_client（請 pip install \"mcp[cli]\"）：{e}")
+        return
+
+    args = RUNTIME.mcp_args.split()
+    print(f"🔌 [MCP] 連線中: {RUNTIME.mcp_command} {' '.join(args)}")
+    bridge = mcp_client.get_bridge(RUNTIME.mcp_command, args)
+    if bridge.error or not bridge.tool_names():
+        print(f"⚠️ [MCP] 連線失敗，改用本地工具：{bridge.error}")
+        return
+
+    MCP_BRIDGE = bridge
+    MCP_TOOL_NAMES = bridge.tool_names()
+    # 同名工具由 MCP 取代（例如 get_database_schema / run_sql_query）
+    base = [t for t in AGENT_TOOLS
+            if t.get("function", {}).get("name") not in MCP_TOOL_NAMES]
+    AGENT_TOOLS = base + bridge.list_openai_tools()
+    print(f"✅ [MCP] 已併入工具: {sorted(MCP_TOOL_NAMES)}")
+
+
+init_mcp()
 
 
 # ============================================================

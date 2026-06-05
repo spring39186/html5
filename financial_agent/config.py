@@ -42,6 +42,13 @@ class RuntimeConfig:
     # confidence 門檻：高於此值才允許走 fast-path 直接回答
     fastpath_confidence: float = float(os.getenv("FA_FASTPATH_CONF", "0.7"))
 
+    # ── MCP（讓 agent 當 MCP client 查資料庫）──
+    # FA_USE_MCP=1 開啟後，agent 會連到下列 MCP server，把它的工具併入可用工具。
+    # 預設指向本地 mock server；要接真實 MSSQL MCP server 時改這兩個環境變數即可。
+    use_mcp: bool = os.getenv("FA_USE_MCP", "0").lower() in ("1", "true", "yes", "on")
+    mcp_command: str = os.getenv("FA_MCP_COMMAND", "python")
+    mcp_args: str = os.getenv("FA_MCP_ARGS", "mcp_server_mssql.py")  # 以空白分隔
+
 
 MODEL_CONFIG = ModelConfig()
 RUNTIME = RuntimeConfig()

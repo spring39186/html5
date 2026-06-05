@@ -59,8 +59,36 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+## Mock MSSQL 資料庫（讓模型產生 SQL 查詢）
+
+用 SQLite in-memory 模擬一台 Microsoft SQL Server，灌入 MSSQL 風格的財務 schema 與假資料。
+模型透過兩個工具操作，不再是寫死的單一 DataFrame：
+
+| 工具 | 作用 |
+|------|------|
+| `get_database_schema` | 回傳資料表/欄位/範例查詢，讓模型「知道能查什麼」 |
+| `run_sql_query` | 執行模型生成的 SQL（唯讀，只允許 SELECT/WITH）並回傳假資料 |
+
+- 引擎在 `mock_db.py`，**純標準函式庫**，可獨立執行測試：`python mock_db.py`。
+- 含安全防護：擋掉 INSERT/UPDATE/DELETE/DROP… 與多語句（stacked queries）。
+- 含 **T-SQL → SQLite 方言轉換**：`SELECT TOP n`、`dbo.` 前綴、`ISNULL/LEN/GETDATE` 等都能跑。
+- 假資料：3 家公司 × 2023–2025 年財務（營收/毛利/淨利/EPS…）＋ 事業部營收。
+- 要換成「真實 MSSQL」時，只要改寫 `mock_db.execute_sql()` 接真實連線即可，agent 不必動。
+
+### （選用）改用 MCP 查詢
+
+`mcp_server_mssql.py` 把同一個引擎包成標準 MCP server，可掛到 Claude Desktop / Cursor：
+
+```bash
+pip install "mcp[cli]"
+python mcp_server_mssql.py        # stdio 啟動
+```
+
+> 你現有的 Ollama + Streamlit agent **不需要**這支也能查（它直接呼叫 `mock_db`）。
+> 這支是為「透過 MCP host 查詢」這條路準備，與 function-calling 共用同一份假資料。
+
 ## 後續可加強
 
-- `query_financial_data` 目前是模擬資料，接真實 DB 即可。
 - 視覺化可改回傳互動式 Plotly 圖（前端 `figures` 欄位已預留）。
 - 多使用者情境下，ChromaDB collection 建議依 session 隔離。
+- mock DB 之後可換真實 MSSQL 或現成的 MSSQL MCP server（如 microsoft/mcp）。

@@ -48,21 +48,38 @@
     {
         "type": "function",
         "function": {
-            "name": "query_financial_data",
-            "description": "【最後手段】查詢歷史財務資料庫。僅在以下情況才可呼叫：(1) 使用者明確要求查詢資料庫；(2) 已透過 parse_financial_pdf + search_knowledge_base 完整搜尋上傳檔案後，確實查無所需數據。【絕對禁止】在有上傳檔案的情況下，跳過檔案解析直接呼叫此工具。",
+            "name": "get_database_schema",
+            "description": "【查資料庫第一步】取得歷史財務資料庫(Microsoft SQL Server)的結構說明：有哪些資料表、欄位、型別與範例查詢。要查資料庫前，必須先呼叫此工具了解可查詢的內容，再據以產生正確的 SQL。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "thought_process": {
                         "type": "string",
-                        "description": "在執行此工具前，請詳細說明：(1) 為什麼需要查詢資料庫？(2) 是否已確認上傳檔案中查無此數據？(3) 查詢的具體目標是什麼？"
-                    },
-                    "query_target": {
-                        "type": "string",
-                        "description": "查詢目標描述（例如：'2024年Q3營收'）。若使用者未指定範圍，預設查詢 2023-2025 年數據。"
+                        "description": "說明你想從資料庫查什麼資訊，以及為什麼需要查詢資料庫。"
                     }
                 },
                 "required": ["thought_process"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_sql_query",
+            "description": "【查資料庫第二步】在歷史財務資料庫執行你產生的 SQL 查詢並回傳結果。唯讀，只允許單一 SELECT/WITH 查詢，支援 T-SQL 語法（如 TOP n、dbo. 前綴）。【最後手段】若有上傳檔案，應先用 parse_financial_pdf + search_knowledge_base 從檔案找答案，確實查無時才查資料庫。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "thought_process": {
+                        "type": "string",
+                        "description": "說明：(1) 這個查詢的目的；(2) 為何已確認需要查資料庫（而非檔案）。"
+                    },
+                    "sql": {
+                        "type": "string",
+                        "description": "要執行的 SELECT 查詢。資料表與欄位名稱請依 get_database_schema 回傳的結構（例如：SELECT c.company_name, f.fiscal_year, f.revenue FROM dbo.fact_financials f JOIN dbo.dim_company c ON f.company_id=c.company_id WHERE c.ticker='2330'）。"
+                    }
+                },
+                "required": ["thought_process", "sql"]
             }
         }
     },

@@ -53,6 +53,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 import chromadb
 
 from config import MODEL_CONFIG, RUNTIME
+import mock_db
 
 # ============================================================
 # 初始化
@@ -428,16 +429,22 @@ def search_knowledge_base(args: dict, file_registry: dict) -> str:
         return f"❌ 檢索失敗: {e}"
 
 
-def query_financial_data(args: dict, file_registry: dict) -> str:
-    """查詢（模擬）歷史資料庫。實務上換成真實 DB 連線即可。"""
-    query_target = args.get("query_target", "2023-2025 整體營收")
-    print(f"📊 [Database] {query_target}")
-    df = pd.DataFrame([
-        {"Year": "2023", "Revenue": 1500, "Profit": 250, "GrowthRate": "N/A"},
-        {"Year": "2024", "Revenue": 1800, "Profit": 320, "GrowthRate": "20%"},
-        {"Year": "2025", "Revenue": 2100, "Profit": 400, "GrowthRate": "16.7%"},
-    ])
-    return df.to_json(orient="records", force_ascii=False)
+def get_database_schema(args: dict, file_registry: dict) -> str:
+    """回傳 mock MSSQL 資料庫的結構說明，讓模型知道能查什麼、欄位怎麼拼。"""
+    print("🗂️ [DB Schema] 提供資料庫結構說明")
+    return mock_db.get_schema()
+
+
+def run_sql_query(args: dict, file_registry: dict) -> str:
+    """執行模型生成的 SQL（唯讀）於 mock MSSQL 模擬器，回傳假資料。"""
+    sql = args.get("sql", "")
+    print(f"📊 [SQL] {sql[:160]}")
+    result = mock_db.execute_sql(sql)
+    if result.get("ok"):
+        print(f"   └─ {result['rowcount']} 筆 | 實際執行: {result.get('translated_sql', '')[:120]}")
+    else:
+        print(f"   └─ ❌ {result.get('error')}")
+    return mock_db.format_result(result)
 
 
 def generate_financial_table(args: dict, file_registry: dict) -> str:
@@ -578,7 +585,8 @@ def translate_text(args: dict, file_registry: dict) -> str:
 TOOL_DISPATCH = {
     "parse_financial_pdf": parse_financial_pdf,
     "search_knowledge_base": search_knowledge_base,
-    "query_financial_data": query_financial_data,
+    "get_database_schema": get_database_schema,
+    "run_sql_query": run_sql_query,
     "generate_financial_table": generate_financial_table,
     "run_python_code": run_python_code,
     "translate_text": translate_text,
@@ -586,14 +594,19 @@ TOOL_DISPATCH = {
 
 
 def dispatch_tool(func_name: str, args: dict, file_registry: dict, thought_logs: list) -> Any:
-    """工具派遣 + 防呆：有檔案卻想跳過解析直查 DB → 攔截。"""
-    if func_name == "query_financial_data" and file_registry:
+    """
+    工具派遣 + 防呆：
+    - 有上傳檔案卻想跳過解析直接查資料庫 → 攔截（除非已先解析檔案）。
+    - run_sql_query 前若沒先看過 schema，仍允許，但若 SQL 失敗會引導去 get_database_schema。
+    """
+    if func_name == "run_sql_query" and file_registry:
         has_parsed = any(
             isinstance(log, dict) and log.get("tool") == "parse_financial_pdf"
             for log in thought_logs
         )
         if not has_parsed:
-            return "❌ 系統攔截：請先呼叫 parse_financial_pdf 解析檔案，禁止直接查資料庫。"
+            return ("❌ 系統攔截：目前有上傳檔案，請先 parse_financial_pdf + "
+                    "search_knowledge_base 從檔案找答案。確實查無時才查資料庫。")
     fn = TOOL_DISPATCH.get(func_name)
     if fn:
         return fn(args, file_registry)
@@ -672,7 +685,9 @@ def build_execution_system_prompt(plan: PlanningResult, file_list: str) -> str:
 
 【其他規則】
 - 跨檔案分析：對「每個檔案」分別呼叫 search_knowledge_base，並指定 file_name。
-- query_financial_data 是最後手段，只在上傳檔案查無數據時使用。
+- 查歷史財務資料庫：先 get_database_schema 看結構 → 再 run_sql_query 產生並執行 SELECT。
+  這是最後手段，只在「使用者明確要求查資料庫」或「上傳檔案查無數據」時使用。
+  SQL 失敗時，依錯誤訊息與 schema 修正後重試。
 
 【已上傳檔案】
 {file_list}
@@ -861,12 +876,18 @@ _DEFAULT_TOOLS = [
             "file_name": {"type": "string", "description": "（選填）限定檔案。跨檔案分析時必填。"},
         }, "required": ["thought_process", "search_query"]}}},
     {"type": "function", "function": {
-        "name": "query_financial_data",
-        "description": "【最後手段】查歷史財務資料庫。僅在已搜尋上傳檔案仍查無數據、或使用者明確要求時呼叫。",
+        "name": "get_database_schema",
+        "description": "【查資料庫第一步】取得歷史財務資料庫(MSSQL)的結構說明（有哪些表、欄位、範例查詢）。要查資料庫前，必須先呼叫此工具了解能查什麼，再產生 SQL。",
         "parameters": {"type": "object", "properties": {
-            "thought_process": {"type": "string", "description": "說明為何需查 DB、是否已確認檔案查無。"},
-            "query_target": {"type": "string", "description": "查詢目標，預設 2023-2025。"},
+            "thought_process": {"type": "string", "description": "說明你想從資料庫查什麼、為何需要。"},
         }, "required": ["thought_process"]}}},
+    {"type": "function", "function": {
+        "name": "run_sql_query",
+        "description": "【查資料庫第二步】在歷史財務資料庫執行你產生的 SQL（唯讀，只允許 SELECT）。支援 T-SQL 語法。【最後手段】有上傳檔案時，應先用 parse_financial_pdf + search_knowledge_base 找答案，確實查無才查資料庫。",
+        "parameters": {"type": "object", "properties": {
+            "thought_process": {"type": "string", "description": "說明這個查詢的目的，以及為何已確認需要查資料庫。"},
+            "sql": {"type": "string", "description": "要執行的 SELECT 查詢。欄位/表名請依 get_database_schema 提供的結構。"},
+        }, "required": ["thought_process", "sql"]}}},
     {"type": "function", "function": {
         "name": "generate_financial_table",
         "description": "把 JSON 數據渲染成專業 HTML 財務表格。",

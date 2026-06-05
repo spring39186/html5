@@ -113,7 +113,7 @@ python mcp_server_mssql.py        # stdio 啟動
 | `FA_MODEL` | `（空）` | **一鍵把 planner/executor/synthesizer/coder/chat 全設成同一顆模型**，徹底消除換模型載入抖動（強烈建議在單 GPU 機器上設定，例如 `qwen3.6:27b`）。vision 仍用 glm-ocr |
 | `FA_REQUEST_TIMEOUT` | `240` | 單次 LLM 請求逾時（秒）。超過就放棄並走降級，不會卡死整個 app |
 | `FA_MAX_EVIDENCE_CHARS` | `12000` | 餵給總結 agent 的證據總長度上限，避免輸入過大導致超慢 |
-| `FA_NORMALIZE_LANG` | `（空）` | 設 `en` 時，OCR 後把每頁統一翻成英文再入庫（跨多國語言文件用）|
+| `FA_NORMALIZE_LANG` | `en` | OCR 後把每頁統一翻成英文再入庫（跨多國語言文件，減少漏資料）。設 `""` 可關閉 |
 | `FA_SYNTHESIZER` | `gemma4:31b` | 總結 agent 模型。**避免用超大模型（如 120B）**，反覆載入會逾時 |
 
 > **避免 model-swap 抖動**：同一任務若用到多顆差異很大的模型（35B/27B/120B），

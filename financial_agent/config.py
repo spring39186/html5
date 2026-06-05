@@ -17,19 +17,22 @@
 import os
 from dataclasses import dataclass
 
+# 一鍵把主要文字角色都設成同一顆模型，徹底消除「換模型載入」抖動。
+# 例如：set FA_MODEL=qwen3.6:27b  → planner/executor/synthesizer/coder/chat 全用它。
+# （vision 仍維持 glm-ocr，因為 OCR 需要視覺模型。）
+_ALL = os.getenv("FA_MODEL", "").strip() or None
+
 
 @dataclass(frozen=True)
 class ModelConfig:
     """各角色使用的模型（可用環境變數覆寫）"""
-    planner: str = os.getenv("FA_PLANNER", "qwen3.6:35b-a3b")   # 中文意圖分析 + 路由
-    executor: str = os.getenv("FA_EXECUTOR", "qwen3.6:35b-a3b")  # 工具決策（預設 Qwen，較穩；可改 gemma4:31b）
-    synthesizer: str = os.getenv("FA_SYNTHESIZER", "gemma4:31b")  # 證據整合 + 統籌呈現（總結 agent）
-    # 註：曾試 mesllm（疑似 gpt-oss-120b），但 120B 反覆載入造成總結逾時，故不用。
-    #     改用 gemma4:31b（密集、載入快）。若覺得繁中略弱，可 FA_SYNTHESIZER=qwen3.6:27b。
-    coder: str = os.getenv("FA_CODER", "qwen3.6:27b")           # 程式碼生成 / 翻譯
-    vision: str = os.getenv("FA_VISION", "glm-ocr")             # PDF / 圖片 OCR
-    chat: str = os.getenv("FA_CHAT", "mesllm")                  # 一般聊天
-    fallback: str = os.getenv("FA_FALLBACK", "qwen3.6:27b")     # 主模型失敗時的備援
+    planner: str = _ALL or os.getenv("FA_PLANNER", "qwen3.6:35b-a3b")   # 中文意圖分析 + 路由
+    executor: str = _ALL or os.getenv("FA_EXECUTOR", "qwen3.6:35b-a3b")  # 工具決策（收集）
+    synthesizer: str = _ALL or os.getenv("FA_SYNTHESIZER", "gemma4:31b")  # 證據整合 + 統籌呈現（總結 agent）
+    coder: str = _ALL or os.getenv("FA_CODER", "qwen3.6:27b")           # 程式碼生成 / 翻譯
+    vision: str = os.getenv("FA_VISION", "glm-ocr")             # PDF / 圖片 OCR（需視覺模型，不受 FA_MODEL 影響）
+    chat: str = _ALL or os.getenv("FA_CHAT", "gemma4:31b")              # 一般聊天
+    fallback: str = _ALL or os.getenv("FA_FALLBACK", "qwen3.6:27b")     # 主模型失敗時的備援
 
 
 @dataclass(frozen=True)

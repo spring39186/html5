@@ -816,7 +816,7 @@ SYNTHESIS_SYSTEM_PROMPT = """你是首席財務分析師（總結整合 agent）
 
 【你的任務】
 1. 整合所有證據，產出一份連貫、專業、結構清楚的繁體中文分析報告。
-2. 自行判斷哪些結果適合視覺化，並把要畫的圖「明確指定」出來（附上實際數據）。
+2. 依使用者提供的【視覺化規則】決定 charts：有要求才指定圖表（附實際數據），沒要求就給空陣列。
 3. 需要結構化表格時，也一併指定。
 
 【鐵則】
@@ -916,8 +916,22 @@ def _gather_evidence(plan: PlanningResult, user_prompt: str,
     return evidence
 
 
+# 視覺化關鍵字：使用者有提到才畫圖
+_VIZ_KEYWORDS = ("圖", "趨勢", "視覺化", "畫", "繪", "長條", "折線", "圓餅", "柱狀",
+                 "chart", "plot", "graph", "bar", "line", "pie", "visuali", "trend")
+
+
+def _wants_visualization(user_prompt: str, plan: PlanningResult) -> bool:
+    """判斷使用者這次是否真的想要圖表（沒要求就不畫）。"""
+    if plan.intent == IntentType.VISUALIZATION:
+        return True
+    low = (user_prompt or "").lower()
+    return any(k in user_prompt or k in low for k in _VIZ_KEYWORDS)
+
+
 def _synthesize(user_prompt: str, plan: PlanningResult,
-                evidence: List[str], resp: AgentResponse) -> dict:
+                evidence: List[str], resp: AgentResponse,
+                want_viz: bool = True) -> dict:
     """整合階段：總結 agent 把證據整合成報告 + 圖表/表格指定（JSON）。"""
     if evidence:
         evidence_text = "\n\n========\n\n".join(evidence)
@@ -928,7 +942,11 @@ def _synthesize(user_prompt: str, plan: PlanningResult,
     if len(evidence_text) > RUNTIME.max_evidence_chars:
         evidence_text = evidence_text[:RUNTIME.max_evidence_chars] + "\n…（證據過長已截斷）"
 
+    viz_rule = ("使用者本次「有要求」視覺化，charts 可填入需要的圖表規格。"
+                if want_viz else
+                "使用者本次「沒有要求」視覺化，charts 一律給空陣列 []，只輸出文字報告（必要時可用表格）。")
     user_block = (f"【使用者需求】\n{user_prompt}\n\n"
+                  f"【視覺化規則】{viz_rule}\n\n"
                   f"【收集到的證據】\n{evidence_text}\n\n"
                   "請整合以上證據，輸出 JSON（report / charts / tables）。")
 
@@ -972,22 +990,35 @@ def _synthesize(user_prompt: str, plan: PlanningResult,
     return {"report": report, "charts": charts, "tables": tables}
 
 
-def _render_chart(spec: dict, resp: AgentResponse) -> None:
-    """視覺化階段：把總結者指定的單張圖交給 Coder 生成並執行。"""
-    title = spec.get("title", "圖表")
-    chart_type = spec.get("chart_type", "")
-    description = spec.get("description", "")
-    data = spec.get("data", [])
-    data_json = json.dumps(data, ensure_ascii=False)
+def _render_charts(charts: List[dict], resp: AgentResponse) -> None:
+    """
+    視覺化階段：把總結者指定的「所有」圖表，一次交給 Coder 畫在「同一張圖」上
+    （用 subplots 排版）。這樣圖會一起出現、可控 layout，也避免多張圖互相覆蓋同一檔案。
+    """
+    if not charts:
+        return
 
-    task = (f"請畫一張「{chart_type or '適當類型'}」圖：{title}。\n"
-            f"需求說明：{description}\n"
-            f"務必只用以下實際數據（不可更改、不可捏造、不可新增資料點）：\n{data_json}")
+    # 組出一段「畫一張含多個子圖」的需求，並附上每張子圖的真實數據
+    n = len(charts)
+    lines = [
+        f"請用 matplotlib 在「單一張圖（一個 figure）」中，以子圖 subplots 排版呈現以下 {n} 個圖表。",
+        "排版要求：自動選擇適當網格（例如 2 欄；單張就 1 個圖），整體用 tight_layout 避免重疊，",
+        "每個子圖都要有自己的標題、座標軸標籤與數值標註；最後只存成一個檔案 output_plot.png。",
+        "鐵則：只能使用我提供的實際數據，不可更改、捏造或新增資料點。\n",
+    ]
+    for i, c in enumerate(charts, 1):
+        lines.append(
+            f"[子圖{i}] 標題：{c.get('title','')}｜類型：{c.get('chart_type','適當類型')}\n"
+            f"說明：{c.get('description','')}\n"
+            f"數據(JSON)：{json.dumps(c.get('data', []), ensure_ascii=False)}\n"
+        )
+    task = "\n".join(lines)
 
-    print(f"  🎨 [Coder] 繪製: {title}")
+    titles = "、".join(c.get("title", f"圖{i}") for i, c in enumerate(charts, 1))
+    print(f"  🎨 [Coder] 一次繪製 {n} 張圖於同一版面: {titles}")
     result = run_python_code({"thought_process": task, "code": ""}, {})
-    _trace(resp, "chart", title=title, chart_type=chart_type,
-           code=_preview(result.get("code", ""), 2000),
+    _trace(resp, "charts", chart_count=n, titles=titles,
+           code=_preview(result.get("code", ""), 2500),
            output=_preview(result.get("output", "")))
     if result.get("plot"):
         resp.images.append(result["plot"])
@@ -999,9 +1030,10 @@ def _execute_tool_loop(plan: PlanningResult, user_prompt: str,
     # 1) 收集證據
     evidence = _gather_evidence(plan, user_prompt, file_registry, resp)
 
-    # 2) 總結 agent 整合
+    # 2) 總結 agent 整合（是否需要視覺化由「使用者是否要求」決定）
     print("\n  🧩 [Synthesize] 總結 agent 整合證據...")
-    synthesis = _synthesize(user_prompt, plan, evidence, resp)
+    want_viz = _wants_visualization(user_prompt, plan)
+    synthesis = _synthesize(user_prompt, plan, evidence, resp, want_viz)
     resp.report_text = synthesis["report"]
 
     # 3) 表格（由總結者指定）
@@ -1015,10 +1047,10 @@ def _execute_tool_loop(plan: PlanningResult, user_prompt: str,
         except Exception as e:  # noqa: BLE001
             print(f"  ⚠️ 表格生成失敗: {e}")
 
-    # 4) 視覺化（總結者指派給 Coder）
-    for chart in synthesis.get("charts", []):
+    # 4) 視覺化：只有使用者要求時才畫，且一次畫好（同一版面）
+    if want_viz:
         try:
-            _render_chart(chart, resp)
+            _render_charts(synthesis.get("charts", []), resp)
         except Exception as e:  # noqa: BLE001
             print(f"  ⚠️ 圖表生成失敗: {e}")
 

@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 執行期產物
+chroma_db/
+ocr_cache/
+temp_dir/
+output_plot.png
+*.md.cache
+
+# 環境變數
+.env

@@ -46,7 +46,8 @@ from openai import OpenAI
 import fitz  # PyMuPDF
 import pandas as pd
 from great_tables import GT
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from chromadb.utils import embedding_functions 
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 import chromadb
 
 from config import MODEL_CONFIG, RUNTIME
@@ -56,10 +57,15 @@ from config import MODEL_CONFIG, RUNTIME
 # ============================================================
 client = OpenAI(base_url=RUNTIME.base_url, api_key=RUNTIME.api_key)
 
-chroma_client = chromadb.PersistentClient(path=RUNTIME.chroma_path)
+# 告訴 ChromaDB 不要上網找，直接去我的 D 槽拿模型！
+local_ef = embedding_functions.SentenceTransformerEmbeddingFunction(
+    model_name=r"D:\ASEHC\K26495\PythonTools\Codes\paraphrase-multilingual-MiniLM-L12-v2"
+)
+
+chroma_client = chromadb.Client()
 collection = chroma_client.get_or_create_collection(
     name="financial_docs",
-    metadata={"hnsw:space": "cosine"},
+    embedding_function=local_ef
 )
 
 os.makedirs(RUNTIME.cache_dir, exist_ok=True)

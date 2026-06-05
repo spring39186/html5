@@ -1,0 +1,124 @@
+"""
+對話記錄與 Agent 思考流程匯出工具
+==================================
+把整段對話（含每一輪的規劃、路由、工具呼叫、思考過程、計時）
+匯出成兩種格式：
+
+- JSON：完整結構化資料，適合程式化分析 / 比較不同版本表現。
+- Markdown：人類可讀的逐輪報告，適合直接閱讀、找出可優化點。
+
+每則 assistant 訊息預期帶有：
+    content, route, planning_result, thought_logs, trace, tables(數量), images
+"""
+
+import json
+from datetime import datetime, timezone
+from typing import List, Dict, Any
+
+
+def build_export_payload(messages: List[Dict[str, Any]], meta: Dict[str, Any] = None) -> dict:
+    """組裝可序列化的完整對話 payload（過濾掉無法 JSON 化的物件）。"""
+    clean_messages = []
+    for m in messages:
+        entry = {"role": m.get("role"), "content": m.get("content", "")}
+        if m.get("role") == "assistant":
+            entry.update({
+                "route": m.get("route", ""),
+                "planning_result": m.get("planning_result"),
+                "thought_logs": m.get("thought_logs", []),
+                "trace": m.get("trace", []),
+                "table_count": len(m.get("tables", []) or []),
+                "images": m.get("images", []),
+            })
+        clean_messages.append(entry)
+    return {
+        "exported_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+        "meta": meta or {},
+        "turns": _count_turns(messages),
+        "messages": clean_messages,
+    }
+
+
+def to_json(messages: List[Dict[str, Any]], meta: Dict[str, Any] = None) -> str:
+    return json.dumps(build_export_payload(messages, meta), ensure_ascii=False, indent=2)
+
+
+def _count_turns(messages: List[Dict[str, Any]]) -> int:
+    return sum(1 for m in messages if m.get("role") == "user")
+
+
+def _fmt_trace_event(ev: dict) -> str:
+    """把單一 trace 事件格式化成 markdown 一段。"""
+    phase = ev.get("phase", "?")
+    ts = ev.get("ts", "")
+    head = f"- **[{phase}]** `{ts}`"
+    parts = [head]
+
+    if "duration_ms" in ev:
+        parts[0] += f" — ⏱ {ev['duration_ms']} ms"
+    if "total_ms" in ev:
+        parts[0] += f" — ⏱ 總計 {ev['total_ms']} ms"
+
+    for key in ("route", "intent", "confidence", "model", "first_tool", "tool", "step"):
+        if key in ev:
+            parts.append(f"  - {key}: `{ev[key]}`")
+    if ev.get("reasoning"):
+        parts.append(f"  - 推理: {ev['reasoning']}")
+    if ev.get("steps"):
+        parts.append(f"  - 步驟: {' → '.join(ev['steps'])}")
+    if ev.get("thought"):
+        parts.append(f"  - 思考: {ev['thought']}")
+    if ev.get("args"):
+        parts.append(f"  - 參數: `{json.dumps(ev['args'], ensure_ascii=False)}`")
+    if ev.get("result_preview"):
+        parts.append(f"  - 結果: {ev['result_preview']}")
+    if ev.get("code"):
+        parts.append(f"  - 生成程式碼:\n\n```python\n{ev['code']}\n```")
+    if ev.get("output"):
+        parts.append(f"  - 輸出: {ev['output']}")
+    return "\n".join(parts)
+
+
+def to_markdown(messages: List[Dict[str, Any]], meta: Dict[str, Any] = None) -> str:
+    """人類可讀的逐輪報告。"""
+    now = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    lines = [
+        "# AI 財務助手 對話記錄與思考流程",
+        f"\n匯出時間：{now}  ｜  對話輪數：{_count_turns(messages)}",
+    ]
+    if meta:
+        lines.append(f"\n模型配置：`{json.dumps(meta, ensure_ascii=False)}`")
+    lines.append("\n---\n")
+
+    turn = 0
+    for m in messages:
+        role = m.get("role")
+        if role == "user":
+            turn += 1
+            lines.append(f"## 第 {turn} 輪")
+            lines.append(f"\n**🧑 使用者：**\n\n{m.get('content', '')}\n")
+        elif role == "assistant":
+            lines.append(f"**🤖 助手回覆：**\n\n{m.get('content', '')}\n")
+
+            if m.get("route"):
+                lines.append(f"> 路由：`{m['route']}`")
+
+            plan = m.get("planning_result")
+            if plan:
+                lines.append("\n**📋 規劃結果：**")
+                lines.append(f"- 意圖：`{plan.get('intent')}` (信心 {plan.get('confidence')})")
+                if plan.get("steps"):
+                    lines.append(f"- 步驟：{' → '.join(plan['steps'])}")
+                if plan.get("reasoning"):
+                    lines.append(f"- 推理：{plan['reasoning']}")
+
+            trace = m.get("trace", [])
+            if trace:
+                lines.append("\n<details><summary><b>🔍 完整執行軌跡（點開）</b></summary>\n")
+                for ev in trace:
+                    lines.append(_fmt_trace_event(ev))
+                lines.append("\n</details>")
+
+            lines.append("\n---\n")
+
+    return "\n".join(lines)

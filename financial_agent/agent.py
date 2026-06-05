@@ -35,10 +35,12 @@ import os
 import io
 import re
 import json
+import time
 import base64
 import subprocess
 import tempfile
 from enum import Enum
+from datetime import datetime, timezone
 from typing import Optional, Dict, List, Any, Tuple
 from dataclasses import dataclass, field
 
@@ -109,6 +111,24 @@ class AgentResponse:
     thought_logs: List[dict] = field(default_factory=list)
     planning_result: Optional[dict] = None
     route: str = ""
+    trace: List[dict] = field(default_factory=list)  # 完整執行軌跡（供下載/優化）
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def _trace(resp: "AgentResponse", phase: str, **fields) -> None:
+    """記錄一筆執行軌跡事件，含時間戳。"""
+    event = {"phase": phase, "ts": _now_iso()}
+    event.update({k: v for k, v in fields.items() if v is not None})
+    resp.trace.append(event)
+
+
+def _preview(value: Any, limit: int = 800) -> str:
+    """把工具結果裁成可讀的預覽（避免 trace 過肥）。"""
+    text = str(value)
+    return text if len(text) <= limit else text[:limit] + f"…（已截斷，共 {len(text)} 字）"
 
 
 # ============================================================
@@ -663,6 +683,7 @@ def _execute_tool_loop(plan: PlanningResult, user_prompt: str,
             resp.report_text = msg.content
         if not msg.tool_calls:
             print("  └─ 完成（無更多工具呼叫）")
+            _trace(resp, "final", step=step, report_text=_preview(resp.report_text, 2000))
             return
 
         messages.append(msg)
@@ -679,17 +700,27 @@ def _execute_tool_loop(plan: PlanningResult, user_prompt: str,
                     {"tool": func_name, "step": step, "thought": args["thought_process"]}
                 )
 
+            t0 = time.perf_counter()
             try:
                 result = dispatch_tool(func_name, args, file_registry, resp.thought_logs)
                 if func_name == "run_python_code" and isinstance(result, dict):
                     if result.get("plot"):
                         resp.images.append(result["plot"])
+                    # 把生成的程式碼也記進 trace，方便事後檢查繪圖品質
+                    _trace(resp, "generated_code", step=step,
+                           code=_preview(result.get("code", ""), 2000))
                     result = result.get("output", "")
                 elif func_name == "generate_financial_table" and not str(result).startswith("❌"):
                     resp.tables.append(result)
                     result = f"✅ 表格已生成：{args.get('title')}"
             except Exception as e:  # noqa: BLE001
                 result = f"⚠️ 工具執行錯誤: {e}"
+            duration_ms = round((time.perf_counter() - t0) * 1000, 1)
+
+            _trace(resp, "tool_call", step=step, tool=func_name,
+                   thought=args.get("thought_process"),
+                   args={k: v for k, v in args.items() if k != "thought_process"},
+                   result_preview=_preview(result), duration_ms=duration_ms)
 
             messages.append({
                 "role": "tool", "tool_call_id": tc.id,
@@ -697,6 +728,7 @@ def _execute_tool_loop(plan: PlanningResult, user_prompt: str,
             })
 
     resp.report_text += "\n\n⚠️ 已達最大執行步驟，任務中斷。"
+    _trace(resp, "max_steps_reached", step=RUNTIME.max_steps)
 
 
 # ============================================================
@@ -709,36 +741,60 @@ def run_financial_agent(user_prompt: str, file_registry: dict = None) -> dict:
     """
     file_registry = file_registry or {}
     resp = AgentResponse()
+    t_start = time.perf_counter()
+    _trace(resp, "request", user_prompt=user_prompt,
+           files=list(file_registry.keys()),
+           models={"planner": MODEL_CONFIG.planner, "executor": MODEL_CONFIG.executor,
+                   "coder": MODEL_CONFIG.coder, "vision": MODEL_CONFIG.vision,
+                   "chat": MODEL_CONFIG.chat})
 
     # Phase 1: 規劃
     print("\n" + "=" * 60 + "\n🧠 [Phase 1] Qwen 意圖分析\n" + "=" * 60)
+    t0 = time.perf_counter()
     plan = planning_phase(user_prompt, file_registry)
+    plan_ms = round((time.perf_counter() - t0) * 1000, 1)
     resp.planning_result = {
         "intent": plan.intent.value, "confidence": plan.confidence,
         "steps": plan.steps, "first_tool": plan.first_tool, "reasoning": plan.reasoning,
     }
     print(f"  ├─ 意圖: {plan.intent.value} (信心 {plan.confidence})")
     print(f"  └─ 首要工具: {plan.first_tool or '無'}")
+    _trace(resp, "planning", model=MODEL_CONFIG.planner,
+           duration_ms=plan_ms, **resp.planning_result)
 
     # Phase 2: 路由
     route = route_by_intent(plan, file_registry)
     resp.route = route
     print(f"🔀 [Phase 2] 路由 → {route}")
+    _trace(resp, "routing", route=route, intent=plan.intent.value,
+           confidence=plan.confidence)
 
     if route == "fast_chat":
         resp.report_text = handle_fast_chat(user_prompt)
+        _trace(resp, "fast_path", route=route, model=MODEL_CONFIG.chat,
+               report_text=_preview(resp.report_text, 2000))
     elif route == "direct_answer":
         resp.report_text = handle_direct_answer(user_prompt, plan)
+        _trace(resp, "fast_path", route=route, model=MODEL_CONFIG.executor,
+               report_text=_preview(resp.report_text, 2000))
     elif route == "fast_translate":
         resp.report_text = handle_fast_translate(user_prompt)
+        _trace(resp, "fast_path", route=route, model=MODEL_CONFIG.coder,
+               report_text=_preview(resp.report_text, 2000))
     elif route == "visualize":
         result = handle_visualize(user_prompt, plan)
         if result.get("plot"):
             resp.images.append(result["plot"])
         resp.report_text = result.get("output", "圖表已生成。")
+        _trace(resp, "visualize", model=MODEL_CONFIG.coder,
+               code=_preview(result.get("code", ""), 2000),
+               output=_preview(result.get("output", "")))
     else:  # execute_tools
         print("\n" + "=" * 60 + "\n⚙️ [Phase 3] Executor 工具執行\n" + "=" * 60)
         _execute_tool_loop(plan, user_prompt, file_registry, resp)
+
+    _trace(resp, "done", total_ms=round((time.perf_counter() - t_start) * 1000, 1),
+           image_count=len(resp.images), table_count=len(resp.tables))
 
     return {
         "report_text": resp.report_text,
@@ -748,6 +804,7 @@ def run_financial_agent(user_prompt: str, file_registry: dict = None) -> dict:
         "thought_logs": resp.thought_logs,
         "planning_result": resp.planning_result,
         "route": resp.route,
+        "trace": resp.trace,
     }
 
 

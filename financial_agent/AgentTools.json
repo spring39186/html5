@@ -1,0 +1,158 @@
+[
+    {
+        "type": "function",
+        "function": {
+            "name": "parse_financial_pdf",
+            "description": "【檔案分析第一步】強大的通用 PDF 視覺解析工具，支援全頁 OCR。當使用者提供檔案名稱並要求閱讀、統整或分析內容時，必須優先呼叫此工具。支援財報、技術報告、合約等各類文件。解析完成後會自動向量化存入知識庫。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "thought_process": {
+                        "type": "string",
+                        "description": "在執行此工具前，請先用繁體中文詳細寫下你的推論過程：為什麼需要解析這個檔案？預期從中獲得什麼資訊？"
+                    },
+                    "file_name": {
+                        "type": "string",
+                        "description": "要解析的檔案名稱（必須與上傳時的檔名完全一致）"
+                    }
+                },
+                "required": ["thought_process", "file_name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_knowledge_base",
+            "description": "【檔案分析第二步】語意檢索工具。當檔案已經透過 parse_financial_pdf 解析完成後，必須呼叫此工具來搜尋檔案內部的具體數據或資訊。支援自然語言查詢，會從知識庫中精準抽出最相關的原文片段。【重要】跨檔案分析時，必須對每個檔案分別呼叫此工具，指定 file_name 參數。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "thought_process": {
+                        "type": "string",
+                        "description": "請說明你想在知識庫中搜尋什麼資訊，以及為什麼需要這些資訊來回答使用者問題。"
+                    },
+                    "search_query": {
+                        "type": "string",
+                        "description": "要搜尋的具體問題或關鍵字（例如：'2025年營業利益率'、'毛利變化趨勢'）"
+                    },
+                    "file_name": {
+                        "type": "string",
+                        "description": "（選填但建議指定）限定只在某個檔案內搜尋。跨檔案分析時【必須】指定此參數，對每個檔案分別搜尋。若留空則搜尋全部已解析檔案。"
+                    }
+                },
+                "required": ["thought_process", "search_query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_database_schema",
+            "description": "【查資料庫第一步】取得歷史財務資料庫(Microsoft SQL Server)的結構說明：有哪些資料表、欄位、型別與範例查詢。要查資料庫前，必須先呼叫此工具了解可查詢的內容，再據以產生正確的 SQL。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "thought_process": {
+                        "type": "string",
+                        "description": "說明你想從資料庫查什麼資訊，以及為什麼需要查詢資料庫。"
+                    }
+                },
+                "required": ["thought_process"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_sql_query",
+            "description": "【查資料庫第二步】在歷史財務資料庫執行你產生的 SQL 查詢並回傳結果。唯讀，只允許單一 SELECT/WITH 查詢，支援 T-SQL 語法（如 TOP n、dbo. 前綴）。【最後手段】若有上傳檔案，應先用 parse_financial_pdf + search_knowledge_base 從檔案找答案，確實查無時才查資料庫。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "thought_process": {
+                        "type": "string",
+                        "description": "說明：(1) 這個查詢的目的；(2) 為何已確認需要查資料庫（而非檔案）。"
+                    },
+                    "sql": {
+                        "type": "string",
+                        "description": "要執行的 SELECT 查詢。資料表與欄位名稱請依 get_database_schema 回傳的結構（例如：SELECT c.company_name, f.fiscal_year, f.revenue FROM dbo.fact_financials f JOIN dbo.dim_company c ON f.company_id=c.company_id WHERE c.ticker='2330'）。"
+                    }
+                },
+                "required": ["thought_process", "sql"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_financial_table",
+            "description": "將 JSON 格式的數據繪製成專業的財務報表。適合呈現結構化的財務數據，支援排序、格式化等功能。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "thought_process": {
+                        "type": "string",
+                        "description": "請說明這個表格的用途，以及你預期呈現什麼樣的數據結構。"
+                    },
+                    "data_json": {
+                        "type": "string",
+                        "description": "要繪製的數據，必須是有效的 JSON 陣列字串（例如：'[{\"Year\": \"2024\", \"Revenue\": 1800}]'）"
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "表格標題"
+                    }
+                },
+                "required": ["thought_process", "data_json", "title"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_python_code",
+            "description": "【程式碼執行與視覺化】Python 程式碼執行環境，適合：(1) 繪製圖表（長條圖、折線圖、圓餅圖等）；(2) 進行複雜的數學計算；(3) 數據處理與轉換。若要繪圖，必須將圖表儲存為 'output_plot.png'。【注意】程式碼會由專門的 Coder 模型（Qwen 27B）優化生成，因此你只要在 thought_process 把需求講清楚即可。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "thought_process": {
+                        "type": "string",
+                        "description": "詳細描述你要完成的任務：(1) 需要什麼樣的圖表或計算？(2) 使用什麼數據？(3) 預期的輸出格式？這個描述會傳給程式碼生成模型。"
+                    },
+                    "code": {
+                        "type": "string",
+                        "description": "（選填）要執行的 Python 程式碼。若留空或僅為描述性文字，系統會自動交給 Coder 模型生成。若自行提供，請含所有 import，繪圖務必設定中文字體並 plt.savefig('output_plot.png')。"
+                    }
+                },
+                "required": ["thought_process"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "translate_text",
+            "description": "專業翻譯工具，由 Coder 模型（Qwen）驅動。支援中英日韓等多語言互譯，特別擅長財務、技術專業術語的準確翻譯。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "thought_process": {
+                        "type": "string",
+                        "description": "說明翻譯需求：原文語言、目標語言、是否有特殊術語需要注意。"
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "要翻譯的原文內容"
+                    },
+                    "target_language": {
+                        "type": "string",
+                        "description": "目標語言（例如：'繁體中文'、'English'、'日本語'）",
+                        "default": "繁體中文"
+                    }
+                },
+                "required": ["thought_process", "text"]
+            }
+        }
+    }
+]

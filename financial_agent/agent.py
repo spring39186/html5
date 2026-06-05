@@ -59,7 +59,7 @@ client = OpenAI(base_url=RUNTIME.base_url, api_key=RUNTIME.api_key)
 
 # 告訴 ChromaDB 不要上網找，直接去我的 D 槽拿模型！
 local_ef = embedding_functions.SentenceTransformerEmbeddingFunction(
-    model_name=r"D:\ASEHC\K26495\PythonTools\Codes\paraphrase-multilingual-MiniLM-L12-v2"
+    model_name=r"D:\ASEHC\K26495\PythonTools\Codes\FinanceAI\paraphrase-multilingual-MiniLM-L12-v2"
 )
 
 chroma_client = chromadb.Client()

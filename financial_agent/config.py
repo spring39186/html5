@@ -78,6 +78,10 @@ class RuntimeConfig:
     deterministic_gather: bool = _bool_env("FA_DETERMINISTIC_GATHER")
     gather_workers: int = int(os.getenv("FA_GATHER_WORKERS", "3"))  # 解析管線檢索階段的並行數
 
+    # 懶人 OCR：PDF 有可用文字層就直接抽取，不呼叫 vision（glm-ocr）；只有掃描頁/影像化表格才用 vision。
+    # 大幅省 OCR 成本與時間。預設開啟；若發現抓不到表格數字，設 FA_LAZY_OCR=0 改回全頁 vision。
+    lazy_ocr: bool = os.getenv("FA_LAZY_OCR", "1").strip().lower() in ("1", "true", "yes", "on")
+
 
 MODEL_CONFIG = ModelConfig()
 RUNTIME = RuntimeConfig()

@@ -341,6 +341,19 @@ def route_by_intent(plan: PlanningResult, file_registry: Dict[str, str]) -> str:
 # ============================================================
 # 工具實作
 # ============================================================
+def _should_vision_ocr(text_layer: str, has_images: bool) -> bool:
+    """懶人 OCR 決策：True=用 vision（掃描頁/影像化表格），False=直接用文字層。"""
+    t = (text_layer or "").strip()
+    if len(t) < 80:
+        return True  # 幾乎沒文字 → 掃描頁，必須 vision
+    digits = sum(c.isdigit() for c in t)
+    digit_ratio = digits / len(t)
+    # 文字少又有圖、數字密度高 → 可能是影像化的表格，用 vision 保險
+    if has_images and len(t) < 400 and digit_ratio > 0.2:
+        return True
+    return False
+
+
 def _cache_path(pdf_path: str) -> str:
     return os.path.join(RUNTIME.cache_dir, f"{os.path.basename(pdf_path)}.md")
 
@@ -424,27 +437,41 @@ def parse_financial_pdf(args: dict, file_registry: dict) -> str:
 
             total_pages = len(doc)
             pages_text = []
+            vision_pages = 0
             for page_num in range(total_pages):
-                print(f"  📄 解析第 {page_num + 1}/{total_pages} 頁...")
                 try:
                     page = doc.load_page(page_num)
-                    pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5))
-                    img_b64 = base64.b64encode(pix.tobytes("png")).decode()
-                    content = _chat(
-                        MODEL_CONFIG.vision,
-                        [{"role": "user", "content": [
-                            {"type": "text", "text":
-                                f"這是 PDF 第 {page_num + 1} 頁。請完整轉成 Markdown，"
-                                f"保留所有表格、數字與文字，不可遺漏任何數據。"},
-                            {"type": "image_url",
-                             "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
-                        ]}],
-                        temperature=0.0,
-                        max_tokens=4096,
-                    )
+                    # 懶人 OCR：先看有沒有可用文字層
+                    text_layer = page.get_text() if RUNTIME.lazy_ocr else ""
+                    has_images = bool(page.get_images()) if RUNTIME.lazy_ocr else True
+                    use_vision = (not RUNTIME.lazy_ocr) or _should_vision_ocr(text_layer, has_images)
+
+                    if not use_vision:
+                        # 直接用文字層，不呼叫 vision（省成本）
+                        print(f"  📄 第 {page_num + 1}/{total_pages} 頁：文字層直抽")
+                        content = text_layer
+                    else:
+                        vision_pages += 1
+                        print(f"  🔍 第 {page_num + 1}/{total_pages} 頁：vision OCR")
+                        pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5))
+                        img_b64 = base64.b64encode(pix.tobytes("png")).decode()
+                        content = _chat(
+                            MODEL_CONFIG.vision,
+                            [{"role": "user", "content": [
+                                {"type": "text", "text":
+                                    f"這是 PDF 第 {page_num + 1} 頁。請完整轉成 Markdown，"
+                                    f"保留所有表格、數字與文字，不可遺漏任何數據。"},
+                                {"type": "image_url",
+                                 "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+                            ]}],
+                            temperature=0.0,
+                            max_tokens=4096,
+                        )
                 except Exception as e:  # noqa: BLE001
                     content = f"_（第 {page_num + 1} 頁解析失敗：{e}）_"
                 pages_text.append(f"## 第 {page_num + 1} 頁\n\n{content}")
+            if RUNTIME.lazy_ocr:
+                print(f"  💰 [Lazy OCR] {total_pages} 頁中只有 {vision_pages} 頁用了 vision")
 
             full_text = "\n\n---\n\n".join(pages_text)
             doc.close()

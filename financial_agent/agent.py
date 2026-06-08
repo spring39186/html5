@@ -346,11 +346,11 @@ def _should_vision_ocr(text_layer: str, has_images: bool) -> bool:
     t = (text_layer or "").strip()
     if len(t) < 80:
         return True  # 幾乎沒文字 → 掃描頁，必須 vision
-    digits = sum(c.isdigit() for c in t)
-    digit_ratio = digits / len(t)
-    # 文字少又有圖、數字密度高 → 可能是影像化的表格，用 vision 保險
-    if has_images and len(t) < 400 and digit_ratio > 0.2:
-        return True
+    # 文字少又有圖 → 才需要看數字密度（可能是影像化的表格）；長文頁直接用文字層
+    if has_images and len(t) < 400:
+        digit_ratio = sum(c.isdigit() for c in t) / len(t)
+        if digit_ratio > 0.2:
+            return True
     return False
 
 

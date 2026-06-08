@@ -371,6 +371,15 @@ def parse_financial_pdf(args: dict, file_registry: dict) -> str:
         available = ", ".join(file_registry.keys()) if file_registry else "無"
         return f"❌ 找不到檔案 '{file_name}'。可用檔案: {available}"
 
+    # 冪等：本檔若已解析入庫（本 session），直接略過，避免模型重複呼叫造成重複 OCR/向量化
+    try:
+        existing = collection.get(where={"file_name": file_name})
+        if existing and existing.get("ids"):
+            return (f"✅ 檔案 {file_name} 先前已解析完成（{len(existing['ids'])} 個區塊），"
+                    f"不需再次解析。請直接呼叫 search_knowledge_base 檢索數據。")
+    except Exception:  # noqa: BLE001
+        pass
+
     normalize = (RUNTIME.normalize_lang == "en")
 
     if RUNTIME.concurrent_ocr:
@@ -486,7 +495,9 @@ def parse_financial_pdf(args: dict, file_registry: dict) -> str:
     except Exception as e:  # noqa: BLE001
         print(f"  ⚠️ 清理舊 chunk 失敗（可忽略）: {e}")
 
-    collection.add(ids=chunk_ids, documents=chunk_docs, metadatas=chunk_metas)
+    # ChromaDB 不接受 None metadata 值 → 過濾掉值為 None 的鍵（結構化分塊常有 page/year=None）
+    safe_metas = [{k: v for k, v in m.items() if v is not None} for m in chunk_metas]
+    collection.add(ids=chunk_ids, documents=chunk_docs, metadatas=safe_metas)
     return (f"✅ 檔案 {file_name} 已完成全頁解析！共 {total_pages} 頁，"
             f"切割成 {len(chunk_docs)} 個知識區塊。請呼叫 search_knowledge_base 檢索數據。")
 
@@ -913,8 +924,16 @@ SYNTHESIS_SYSTEM_PROMPT = """你是首席財務分析師（總結整合 agent）
 - 只能使用證據中實際出現的數據，嚴禁捏造、臆測或自行假設數字。
 - 若證據不足以回答某部分，在報告中誠實說明「資料不足」，不要硬湊。
 - 圖表/表格的 data 必須是從證據抽出的真實數值。
-- 【不可漏年度】使用者若要各年度指標，務必把證據中出現的「每一個年度」都列出，逐年比對，
-  不可只挑其中幾年。動手前先在心中盤點證據裡出現過哪些年度，確保全部涵蓋。
+- 【年度判讀，最重要】財報幾乎都同時列「本期」與「去年同期比較數」。你必須從證據文字判讀
+  每段內容的「本期所屬會計年度」，並以各份報告的『本期年度』作為分析年度。判讀線索例如：
+  「For the fiscal year 2023」「year ended 31 August 2024」「FYE Aug 2025」「当期/通期…2025年8月期」
+  → 該段本期年度分別為 2023、2024、2025。
+  規則：
+  (1) 先盤點證據中總共出現哪些『本期年度』，分析就涵蓋「全部這些本期年度」，一個都不能漏
+      （特別是最新年度，它常只出現在最新那份報告裡）。
+  (2) 「去年比較數」只用來對照或補洞，絕不可把比較年度當成獨立分析年度
+      （例：2023 報告裡附的 2022 數字，不要把 2022 列成一個分析年度）。
+  (3) 同一年度若多份報告都有，數字應一致；以該年度為『本期』的那份報告為準。
 - 【單位一致】不同來源可能用不同單位（億日圓 / 百萬日圓 / 兆日圓；億元 等）。
   比較或畫圖前，務必先「換算成同一單位」，並在報告中標明所用單位；
   例：2,766,557 百萬日圓 = 約 2.77 兆日圓 = 27,665 億日圓。換算錯誤等同捏造，請特別小心。
@@ -947,6 +966,8 @@ def _gather_evidence(plan: PlanningResult, user_prompt: str,
     ]
     tools = _gather_tools()
     evidence: List[str] = []
+    tool_used = False
+    nudged = False
 
     for step in range(1, RUNTIME.max_steps + 1):
         print(f"\n  [Gather {step}/{RUNTIME.max_steps}]")
@@ -963,9 +984,18 @@ def _gather_evidence(plan: PlanningResult, user_prompt: str,
 
         msg = api_resp.choices[0].message
         if not msg.tool_calls:
+            # 模型有時會直接以文字回答而不呼叫工具；若還沒撈到任何證據就先「催一次」
+            if tools and not tool_used and not nudged:
+                nudged = True
+                print("  ↪︎ 模型未呼叫工具，催促改用工具…")
+                messages.append({"role": "user", "content":
+                    "你必須使用上面提供的工具來實際取得資料（例如 get_database_schema 後 "
+                    "run_sql_query，或 search_knowledge_base），不可僅以文字回答或自行假設。請現在呼叫工具。"})
+                continue
             print("  └─ 收集完成")
             break
 
+        tool_used = True
         messages.append(msg)
         for tc in msg.tool_calls:
             func_name = tc.function.name
@@ -1040,6 +1070,7 @@ def _synthesize(user_prompt: str, plan: PlanningResult,
     viz_rule = ("使用者本次「有要求」視覺化，charts 可填入需要的圖表規格。"
                 if want_viz else
                 "使用者本次「沒有要求」視覺化，charts 一律給空陣列 []，只輸出文字報告（必要時可用表格）。")
+
     user_block = (f"【使用者需求】\n{user_prompt}\n\n"
                   f"【視覺化規則】{viz_rule}\n\n"
                   f"【收集到的證據】\n{evidence_text}\n\n"

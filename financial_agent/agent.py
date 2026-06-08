@@ -62,9 +62,10 @@ import mock_db
 # ============================================================
 client = OpenAI(base_url=RUNTIME.base_url, api_key=RUNTIME.api_key)
 
-# 告訴 ChromaDB 不要上網找，直接去我的 D 槽拿模型！
+# 本機 embedding 模型：用 FA_EMBED_MODEL 切換（例如指向 BAAI/bge-m3 的本機路徑）。
+# 未設定時沿用原本的 MiniLM 路徑，保持現有行為。
 local_ef = embedding_functions.SentenceTransformerEmbeddingFunction(
-    model_name=r"D:\ASEHC\K26495\PythonTools\Codes\FinanceAI\paraphrase-multilingual-MiniLM-L12-v2"
+    model_name=RUNTIME.embed_model
 )
 
 chroma_client = chromadb.Client()

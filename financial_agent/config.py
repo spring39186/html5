@@ -47,6 +47,11 @@ class RuntimeConfig:
     base_url: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
     api_key: str = os.getenv("OLLAMA_API_KEY", "ollama")
     chroma_path: str = os.getenv("FA_CHROMA_PATH", "./chroma_db")
+    # 本機 embedding 模型（sentence-transformers 路徑或名稱）。建議改用 BAAI/bge-m3：
+    #   set FA_EMBED_MODEL=D:\path\to\bge-m3
+    embed_model: str = os.getenv(
+        "FA_EMBED_MODEL",
+        r"D:\ASEHC\K26495\PythonTools\Codes\FinanceAI\paraphrase-multilingual-MiniLM-L12-v2")
     cache_dir: str = os.getenv("FA_CACHE_DIR", "./ocr_cache")
     tools_path: str = os.getenv("FA_TOOLS_PATH", "AgentTools.json")
     max_steps: int = int(os.getenv("FA_MAX_STEPS", "12"))

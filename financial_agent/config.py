@@ -80,6 +80,10 @@ class RuntimeConfig:
     embed_model: str = os.getenv(
         "FA_EMBED_MODEL",
         r"D:\ASEHC\K26495\PythonTools\Codes\FinanceAI\paraphrase-multilingual-MiniLM-L12-v2")
+    # embedding 運算裝置：有 GPU 設 cuda 會快非常多（bge-m3 在 CPU 很慢）。預設 cpu。
+    embed_device: str = os.getenv("FA_EMBED_DEVICE", "cpu")
+    # 持久化向量庫：設 1 用 PersistentClient（向量落地，重啟不必重新向量化）；預設 0=記憶體版。
+    persist_chroma: bool = os.getenv("FA_PERSIST_CHROMA", "0").strip().lower() in ("1", "true", "yes", "on")
     cache_dir: str = os.getenv("FA_CACHE_DIR", "./ocr_cache")
     tools_path: str = os.getenv("FA_TOOLS_PATH", "AgentTools.json")
     max_steps: int = int(os.getenv("FA_MAX_STEPS", "12"))

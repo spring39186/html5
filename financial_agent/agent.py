@@ -62,13 +62,15 @@ import mock_db
 # ============================================================
 client = OpenAI(base_url=RUNTIME.base_url, api_key=RUNTIME.api_key)
 
-# 本機 embedding 模型：用 FA_EMBED_MODEL 切換（例如指向 BAAI/bge-m3 的本機路徑）。
-# 未設定時沿用原本的 MiniLM 路徑，保持現有行為。
+# 本機 embedding 模型：FA_EMBED_MODEL 切換（指向 bge-m3 路徑）；FA_EMBED_DEVICE=cuda 用 GPU。
 local_ef = embedding_functions.SentenceTransformerEmbeddingFunction(
-    model_name=RUNTIME.embed_model
+    model_name=RUNTIME.embed_model,
+    device=RUNTIME.embed_device,
 )
 
-chroma_client = chromadb.Client()
+# FA_PERSIST_CHROMA=1 → 向量落地，重啟不必重新向量化；預設記憶體版。
+chroma_client = (chromadb.PersistentClient(path=RUNTIME.chroma_path)
+                 if RUNTIME.persist_chroma else chromadb.Client())
 collection = chroma_client.get_or_create_collection(
     name="financial_docs",
     embedding_function=local_ef

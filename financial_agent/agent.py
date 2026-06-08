@@ -1134,19 +1134,12 @@ def _render_charts(charts: List[dict], resp: AgentResponse) -> None:
         resp.images.append(result["plot"])
 
 
-def _execute_tool_loop(plan: PlanningResult, user_prompt: str,
-                       file_registry: dict, resp: AgentResponse) -> None:
-    """統籌三階段：收集 → 整合 → 視覺化/表格 → 一起呈現。"""
-    # 1) 收集證據
-    evidence = _gather_evidence(plan, user_prompt, file_registry, resp)
+def _present_synthesis(synthesis: dict, resp: AgentResponse,
+                       file_registry: dict, want_viz: bool) -> None:
+    """呈現階段：把總結者指定的表格與圖表產出（供工具流程與 LangGraph 共用）。"""
+    resp.report_text = synthesis.get("report", resp.report_text)
 
-    # 2) 總結 agent 整合（是否需要視覺化由「使用者是否要求」決定）
-    print("\n  🧩 [Synthesize] 總結 agent 整合證據...")
-    want_viz = _wants_visualization(user_prompt, plan)
-    synthesis = _synthesize(user_prompt, plan, evidence, resp, want_viz)
-    resp.report_text = synthesis["report"]
-
-    # 3) 表格（由總結者指定）
+    # 表格（由總結者指定）
     for tbl in synthesis.get("tables", []):
         try:
             html = generate_financial_table(
@@ -1157,7 +1150,7 @@ def _execute_tool_loop(plan: PlanningResult, user_prompt: str,
         except Exception as e:  # noqa: BLE001
             print(f"  ⚠️ 表格生成失敗: {e}")
 
-    # 4) 視覺化：只有使用者要求時才畫，且一次畫好（同一版面）
+    # 視覺化：只有使用者要求時才畫，且一次畫好（同一版面）
     if want_viz:
         try:
             _render_charts(synthesis.get("charts", []), resp)
@@ -1165,6 +1158,16 @@ def _execute_tool_loop(plan: PlanningResult, user_prompt: str,
             print(f"  ⚠️ 圖表生成失敗: {e}")
 
     _trace(resp, "present", tables=len(resp.tables), images=len(resp.images))
+
+
+def _execute_tool_loop(plan: PlanningResult, user_prompt: str,
+                       file_registry: dict, resp: AgentResponse) -> None:
+    """統籌三階段：收集 → 整合 → 視覺化/表格 → 一起呈現。"""
+    evidence = _gather_evidence(plan, user_prompt, file_registry, resp)
+    print("\n  🧩 [Synthesize] 總結 agent 整合證據...")
+    want_viz = _wants_visualization(user_prompt, plan)
+    synthesis = _synthesize(user_prompt, plan, evidence, resp, want_viz)
+    _present_synthesis(synthesis, resp, file_registry, want_viz)
 
 
 # ============================================================
@@ -1178,6 +1181,14 @@ def run_financial_agent(user_prompt: str, file_registry: dict = None,
 
     history: 先前對話（list of {"role","content"}，純文字），用於理解追問與保持脈絡。
     """
+    # LangGraph 編排（FA_USE_GRAPH=1）：交給 graph.py 跑同一套節點，回傳相同 dict
+    if RUNTIME.use_graph:
+        try:
+            import graph
+            return graph.run(user_prompt, file_registry or {}, history or [])
+        except Exception as e:  # noqa: BLE001
+            print(f"⚠️ LangGraph 執行失敗，回退原生流程: {e}")
+
     file_registry = file_registry or {}
     history = history or []
     resp = AgentResponse()

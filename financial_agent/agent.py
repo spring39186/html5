@@ -886,16 +886,18 @@ def build_gather_system_prompt(plan: PlanningResult, file_list: str) -> str:
     if RUNTIME.normalize_lang == "en":
         search_lang_rule = (
             "【知識庫語言：英文】所有檔案內容已統一翻成英文入庫，因此 search_query "
-            "「一律用英文財務術語」，不要用中文或日文關鍵字（否則會比對不到）。例如：\n"
-            "   - 營收：revenue / net sales\n"
-            "   - 營業利益：operating income / operating profit\n"
-            "   - 淨利：profit attributable to owners of the parent / net income\n"
-            "   - 資本支出：capital expenditure / CAPEX\n"
-            "   - EPS：earnings per share / basic EPS")
+            "「一律用英文財務術語」，不要用中文或日文關鍵字（否則會比對不到）。\n"
+            "   而且每個 query 結尾都「加上 current fiscal year」，以鎖定『本期』數字、"
+            "避免撈到去年比較數。範例：\n"
+            "   - 營收：revenue current fiscal year\n"
+            "   - 營業利益：operating income current fiscal year\n"
+            "   - 淨利：profit attributable to owners of the parent current fiscal year\n"
+            "   - 資本支出：capital expenditure CAPEX current fiscal year\n"
+            "   - EPS：basic earnings per share current fiscal year")
     else:
         search_lang_rule = (
             "請用「該檔案原文語言」的正式用語（中文檔『營業收入』、英文檔『revenue net sales』、"
-            "日文檔『売上収益』；淨利同理）。")
+            "日文檔『売上収益』），並在結尾加上『當期/本期』以鎖定本期數字。")
 
     return f"""【前置規劃（由 Planner 提供）】
 - 意圖: {plan.intent.value}

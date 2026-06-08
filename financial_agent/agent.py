@@ -980,6 +980,12 @@ def _gather_evidence(plan: PlanningResult, user_prompt: str,
             api_resp = client.chat.completions.create(**params)
         except Exception as e:  # noqa: BLE001
             _trace(resp, "gather_error", error=str(e))
+            # 收集階段一開始就失敗（常見：執行器模型名稱打錯/未安裝）。
+            # 把真正錯誤帶進證據，避免總結誤報成「資料不足」而掩蓋根因。
+            if not tool_used:
+                evidence.append(
+                    f"⚠️ 系統錯誤：收集階段呼叫執行器模型（FA_EXECUTOR='{MODEL_CONFIG.executor}'）失敗：{e}\n"
+                    f"請在報告中直接說明此錯誤，並提示使用者確認該模型名稱是否正確、是否已在 Ollama 安裝。")
             break
 
         msg = api_resp.choices[0].message

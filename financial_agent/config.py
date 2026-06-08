@@ -18,6 +18,34 @@ import os
 from dataclasses import dataclass
 
 
+def _load_dotenv(filename: str = ".env") -> None:
+    """極簡 .env 載入：把 KEY=VALUE 寫進環境變數（已存在的真實環境變數優先）。
+    這樣設定寫在 .env 檔即可，不必每次在 PowerShell key 變數。"""
+    for path in (filename, os.path.join(os.path.dirname(__file__), filename)):
+        if os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#") or "=" not in line:
+                            continue
+                        key, val = line.split("=", 1)
+                        key = key.strip()
+                        val = val.strip()
+                        # 去掉行內註解（空白後的 # ...），引號值則保留原樣
+                        if val[:1] not in ('"', "'") and " #" in val:
+                            val = val.split(" #", 1)[0].strip()
+                        val = val.strip('"').strip("'")
+                        if key:
+                            os.environ.setdefault(key, val)  # 真實環境變數優先
+            except Exception:  # noqa: BLE001
+                pass
+            break
+
+
+_load_dotenv()  # 必須在讀取 os.getenv 之前載入
+
+
 def _bool_env(name: str, default: str = "0") -> bool:
     """統一的環境變數布林解析（避免各處複製 in ("1","true","yes","on")）。"""
     return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "on")

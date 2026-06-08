@@ -12,5 +12,4 @@ temp_dir/
 output_plot.png
 *.md.cache
 
-# 環境變數
-.env
+# 環境變數（.env 改為「追蹤」，方便把設定寫在檔案裡共用；機密請勿放這）

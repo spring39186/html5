@@ -371,6 +371,15 @@ def parse_financial_pdf(args: dict, file_registry: dict) -> str:
         available = ", ".join(file_registry.keys()) if file_registry else "無"
         return f"❌ 找不到檔案 '{file_name}'。可用檔案: {available}"
 
+    # 冪等：本檔若已解析入庫（本 session），直接略過，避免模型重複呼叫造成重複 OCR/向量化
+    try:
+        existing = collection.get(where={"file_name": file_name})
+        if existing and existing.get("ids"):
+            return (f"✅ 檔案 {file_name} 先前已解析完成（{len(existing['ids'])} 個區塊），"
+                    f"不需再次解析。請直接呼叫 search_knowledge_base 檢索數據。")
+    except Exception:  # noqa: BLE001
+        pass
+
     normalize = (RUNTIME.normalize_lang == "en")
 
     if RUNTIME.concurrent_ocr:
@@ -486,7 +495,9 @@ def parse_financial_pdf(args: dict, file_registry: dict) -> str:
     except Exception as e:  # noqa: BLE001
         print(f"  ⚠️ 清理舊 chunk 失敗（可忽略）: {e}")
 
-    collection.add(ids=chunk_ids, documents=chunk_docs, metadatas=chunk_metas)
+    # ChromaDB 不接受 None metadata 值 → 過濾掉值為 None 的鍵（結構化分塊常有 page/year=None）
+    safe_metas = [{k: v for k, v in m.items() if v is not None} for m in chunk_metas]
+    collection.add(ids=chunk_ids, documents=chunk_docs, metadatas=safe_metas)
     return (f"✅ 檔案 {file_name} 已完成全頁解析！共 {total_pages} 頁，"
             f"切割成 {len(chunk_docs)} 個知識區塊。請呼叫 search_knowledge_base 檢索數據。")
 

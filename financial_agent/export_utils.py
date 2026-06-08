@@ -40,7 +40,9 @@ def build_export_payload(messages: List[Dict[str, Any]], meta: Dict[str, Any] = 
 
 
 def to_json(messages: List[Dict[str, Any]], meta: Dict[str, Any] = None) -> str:
-    return json.dumps(build_export_payload(messages, meta), ensure_ascii=False, indent=2)
+    # default=str 保證任何非標準型別都能序列化，匯出永不因單筆資料而失敗
+    return json.dumps(build_export_payload(messages, meta),
+                      ensure_ascii=False, indent=2, default=str)
 
 
 def _count_turns(messages: List[Dict[str, Any]]) -> int:
@@ -65,11 +67,14 @@ def _fmt_trace_event(ev: dict) -> str:
     if ev.get("reasoning"):
         parts.append(f"  - 推理: {ev['reasoning']}")
     if ev.get("steps"):
-        parts.append(f"  - 步驟: {' → '.join(ev['steps'])}")
+        parts.append(f"  - 步驟: {' → '.join(str(s) for s in ev['steps'])}")
     if ev.get("thought"):
         parts.append(f"  - 思考: {ev['thought']}")
     if ev.get("args"):
-        parts.append(f"  - 參數: `{json.dumps(ev['args'], ensure_ascii=False)}`")
+        try:
+            parts.append(f"  - 參數: `{json.dumps(ev['args'], ensure_ascii=False, default=str)}`")
+        except Exception:  # noqa: BLE001
+            parts.append(f"  - 參數: `{ev['args']}`")
     if ev.get("result_preview"):
         parts.append(f"  - 結果: {ev['result_preview']}")
     if ev.get("code"):

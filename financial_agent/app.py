@@ -65,11 +65,18 @@ with st.sidebar:
     _has_history = any(m["role"] == "user" for m in st.session_state.messages)
     _stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
+    # 匯出字串在每次 rerun 都會重算；以 try/except 包住，避免單筆異常資料讓整個 app 崩潰
+    try:
+        _json_data = export_utils.to_json(st.session_state.messages, _meta)
+        _md_data = export_utils.to_markdown(st.session_state.messages, _meta)
+    except Exception as e:  # noqa: BLE001
+        _json_data = _md_data = f"匯出失敗：{e}"
+
     col_j, col_m = st.columns(2)
     with col_j:
         st.download_button(
             "⬇️ JSON",
-            data=export_utils.to_json(st.session_state.messages, _meta),
+            data=_json_data,
             file_name=f"agent_log_{_stamp}.json",
             mime="application/json",
             use_container_width=True,
@@ -79,7 +86,7 @@ with st.sidebar:
     with col_m:
         st.download_button(
             "⬇️ Markdown",
-            data=export_utils.to_markdown(st.session_state.messages, _meta),
+            data=_md_data,
             file_name=f"agent_log_{_stamp}.md",
             mime="text/markdown",
             use_container_width=True,

@@ -127,8 +127,7 @@ def _synthesize(state: AgentState) -> dict:
     resp = state["_resp"]
     want = agent._wants_visualization(state["user_query"], state["_plan"])
     synth = agent._synthesize(state["user_query"], state["_plan"],
-                              state.get("evidence") or [], resp, want,
-                              state.get("file_registry") or {})
+                              state.get("evidence") or [], resp, want)
     return {"_resp": resp, "_synth": synth, "_want_viz": want,
             "answer": synth.get("report", "")}
 

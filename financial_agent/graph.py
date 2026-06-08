@@ -33,6 +33,7 @@ run_financial_agent 會自動回退到原生流程，不影響系統可用性。
 from __future__ import annotations
 
 import time
+from functools import lru_cache
 from typing import Any, List, Optional, TypedDict
 
 import agent  # 由 run_financial_agent 惰性載入；此時 agent 已完成初始化
@@ -74,14 +75,12 @@ def _planner(state: AgentState) -> dict:
     agent._trace(resp, "request", user_prompt=uq, files=list(fr.keys()),
                  history_turns=len(state.get("history") or []), engine="langgraph")
     plan = agent.planning_phase(uq, fr, state.get("history") or [])
-    resp.planning_result = {
-        "intent": plan.intent.value, "confidence": plan.confidence,
-        "steps": plan.steps, "first_tool": plan.first_tool, "reasoning": plan.reasoning,
-    }
+    resp.planning_result = agent._build_planning_result(plan)
     route = agent.route_by_intent(plan, fr)
     resp.route = route
     agent._trace(resp, "planning", model=agent.MODEL_CONFIG.planner, **resp.planning_result)
-    agent._trace(resp, "routing", route=route, intent=plan.intent.value)
+    agent._trace(resp, "routing", route=route, intent=plan.intent.value,
+                 confidence=plan.confidence)
     return {"_plan": plan, "_resp": resp, "intent": plan.intent.value, "route": route}
 
 
@@ -121,7 +120,7 @@ def _gather(state: AgentState) -> dict:
     resp = state["_resp"]
     evidence = agent._gather_evidence(state["_plan"], state["user_query"],
                                       state.get("file_registry") or {}, resp)
-    return {"_resp": resp, "evidence": evidence, "retrieved_chunks": evidence}
+    return {"_resp": resp, "evidence": evidence}
 
 
 def _synthesize(state: AgentState) -> dict:
@@ -140,20 +139,11 @@ def _present(state: AgentState) -> dict:
     return {"_resp": resp, "plotly_jsons": resp.plotly_jsons}
 
 
-def _route_selector(state: AgentState) -> str:
-    return state.get("route", "execute_tools")
-
-
 # ============================================================
 # 建圖（編譯一次、重用）
 # ============================================================
-_compiled = None
-
-
+@lru_cache(maxsize=1)
 def _build():
-    global _compiled
-    if _compiled is not None:
-        return _compiled
     from langgraph.graph import StateGraph, END
 
     g = StateGraph(AgentState)
@@ -167,7 +157,7 @@ def _build():
     g.add_node("present", _present)
 
     g.set_entry_point("planner")
-    g.add_conditional_edges("planner", _route_selector, {
+    g.add_conditional_edges("planner", lambda s: s.get("route", "execute_tools"), {
         "fast_chat": "fast_chat",
         "fast_translate": "fast_translate",
         "direct_answer": "direct_answer",
@@ -199,15 +189,4 @@ def run(user_prompt: str, file_registry: dict = None, history: List[dict] = None
     resp = final["_resp"]
     agent._trace(resp, "done", total_ms=round((time.perf_counter() - t_start) * 1000, 1),
                  image_count=len(resp.images), table_count=len(resp.tables))
-    return {
-        "report_text": resp.report_text,
-        "figures": [],
-        "plotly_jsons": resp.plotly_jsons,
-        "tables": resp.tables,
-        "images": resp.images,
-        "thought_logs": resp.thought_logs,
-        "planning_result": resp.planning_result,
-        "route": resp.route,
-        "executed_sql": resp.executed_sql,
-        "trace": resp.trace,
-    }
+    return agent._build_result(resp)  # 與 run_financial_agent 共用同一建構器

@@ -1171,6 +1171,32 @@ def _execute_tool_loop(plan: PlanningResult, user_prompt: str,
 
 
 # ============================================================
+# 共用建構器（run_financial_agent 與 graph.run 共用，避免兩處平行維護）
+# ============================================================
+def _build_planning_result(plan: PlanningResult) -> dict:
+    return {
+        "intent": plan.intent.value, "confidence": plan.confidence,
+        "steps": plan.steps, "first_tool": plan.first_tool, "reasoning": plan.reasoning,
+    }
+
+
+def _build_result(resp: AgentResponse) -> dict:
+    """把 AgentResponse 組成對前端的回傳 dict（單一來源，兩個入口共用）。"""
+    return {
+        "report_text": resp.report_text,
+        "figures": [],          # 舊欄位保留相容
+        "plotly_jsons": resp.plotly_jsons,
+        "tables": resp.tables,
+        "images": resp.images,
+        "thought_logs": resp.thought_logs,
+        "planning_result": resp.planning_result,
+        "route": resp.route,
+        "executed_sql": resp.executed_sql,
+        "trace": resp.trace,
+    }
+
+
+# ============================================================
 # 主執行入口
 # ============================================================
 def run_financial_agent(user_prompt: str, file_registry: dict = None,
@@ -1204,10 +1230,7 @@ def run_financial_agent(user_prompt: str, file_registry: dict = None,
     t0 = time.perf_counter()
     plan = planning_phase(user_prompt, file_registry, history)
     plan_ms = round((time.perf_counter() - t0) * 1000, 1)
-    resp.planning_result = {
-        "intent": plan.intent.value, "confidence": plan.confidence,
-        "steps": plan.steps, "first_tool": plan.first_tool, "reasoning": plan.reasoning,
-    }
+    resp.planning_result = _build_planning_result(plan)
     print(f"  ├─ 意圖: {plan.intent.value} (信心 {plan.confidence})")
     print(f"  └─ 首要工具: {plan.first_tool or '無'}")
     _trace(resp, "planning", model=MODEL_CONFIG.planner,
@@ -1248,18 +1271,7 @@ def run_financial_agent(user_prompt: str, file_registry: dict = None,
     _trace(resp, "done", total_ms=round((time.perf_counter() - t_start) * 1000, 1),
            image_count=len(resp.images), table_count=len(resp.tables))
 
-    return {
-        "report_text": resp.report_text,
-        "figures": [],          # 舊欄位保留相容
-        "plotly_jsons": resp.plotly_jsons,   # 互動式 Plotly 圖（FA_PLOTLY 開啟時）
-        "tables": resp.tables,
-        "images": resp.images,
-        "thought_logs": resp.thought_logs,
-        "planning_result": resp.planning_result,
-        "route": resp.route,
-        "executed_sql": resp.executed_sql,
-        "trace": resp.trace,
-    }
+    return _build_result(resp)
 
 
 # 便利別名

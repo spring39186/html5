@@ -562,9 +562,23 @@ def _hybrid_search(search_query: str, file_name: Optional[str],
     tx = translate_and_expand_query(search_query, _llm)
     eng_query = tx.get("translated_query", search_query)
     expanded = tx.get("expanded_terms", [])
+    return _retrieve_and_format(eng_query, expanded, where_filter, file_name,
+                                n_results, original=search_query)
+
+
+def _retrieve_en(query_en: str, file_name: Optional[str], n_results: int = 8) -> str:
+    """已是英文的查詢：直接檢索，跳過翻譯（給確定性管線用，省掉大量 LLM 呼叫）。"""
+    where = {"file_name": file_name} if file_name else None
+    return _retrieve_and_format(query_en, [], where, file_name, n_results, original=query_en)
+
+
+def _retrieve_and_format(eng_query: str, expanded: List[str],
+                         where_filter: Optional[dict], file_name: Optional[str],
+                         n_results: int, original: str = "") -> str:
+    """dense(Chroma) + BM25 + RRF（+可選 rerank），組成可讀片段。不含翻譯。"""
+    from retrieval import HybridRetriever
     effective = (eng_query + " " + " ".join(expanded)).strip()
 
-    # dense：取較多候選給 RRF 融合
     raw = collection.query(
         query_texts=[effective], n_results=max(n_results, 20),
         where=where_filter, include=["documents", "metadatas", "distances"],
@@ -574,7 +588,7 @@ def _hybrid_search(search_query: str, file_name: Optional[str],
     metas0 = (raw.get("metadatas") or [[]])[0]
     dists0 = (raw.get("distances") or [[]])[0]
     if not docs0:
-        return f"⚠️ 知識庫中找不到與 '{search_query}' 相關的內容。"
+        return f"⚠️ 知識庫中找不到與 '{original or eng_query}' 相關的內容。"
 
     dense_results = [{"id": i, "text": d, "metadata": m, "score": max(0.0, 1.0 - dist)}
                      for i, d, m, dist in zip(ids0, docs0, metas0, dists0)]
@@ -586,7 +600,7 @@ def _hybrid_search(search_query: str, file_name: Optional[str],
                            dense_results=dense_results, top_k=n_results)
     hits = out.get("results", [])
     if not hits:
-        return f"⚠️ 知識庫中找不到與 '{search_query}' 相關的內容。"
+        return f"⚠️ 知識庫中找不到與 '{original or eng_query}' 相關的內容。"
 
     blocks = []
     for r in hits:
@@ -594,8 +608,8 @@ def _hybrid_search(search_query: str, file_name: Optional[str],
         blocks.append(f"【來源: {m.get('source_file', m.get('file_name', '未知'))} | "
                       f"區塊 #{m.get('chunk_index', '?')}】\n{r['text']}")
     context = "\n\n---\n\n".join(blocks)
-    print(f"🔍 [Hybrid] '{search_query}'→'{eng_query}' | {file_name or '全域'} | {len(blocks)} 片段")
-    return (f"🔍 混合檢索成功（查詢英譯：{eng_query}），找到 {len(blocks)} 個片段：\n\n"
+    print(f"🔍 [Hybrid] '{original or eng_query}' | {file_name or '全域'} | {len(blocks)} 片段")
+    return (f"🔍 檢索成功（{eng_query}），找到 {len(blocks)} 個片段：\n\n"
             f"{context}\n\n請只根據以上原文回答，禁止捏造。")
 
 
@@ -1015,7 +1029,8 @@ def _gather_files_deterministic(user_prompt: str, file_registry: dict,
         rows = []
         for label, q in _STD_METRIC_QUERIES:
             try:
-                r = str(search_knowledge_base({"search_query": q, "file_name": fn}, file_registry))
+                # 直接英文檢索（跳過翻譯），只取前 4 段、每段精簡，控制證據總量
+                r = _retrieve_en(q, fn, n_results=4)
             except Exception as e:  # noqa: BLE001
                 r = f"⚠️ 檢索失敗: {e}"
             rows.append((fn, label, q, r))
@@ -1028,10 +1043,18 @@ def _gather_files_deterministic(user_prompt: str, file_registry: dict,
             if rows:
                 by_file[rows[0][0]] = rows
 
+    # 每檔給「均衡」的證據預算，確保每個檔案（每個年度）都進得了總結，不會被截斷吃掉
+    # 乘 0.85 留邊（分隔符與抽數注入），總量穩在 max_evidence_chars 內
+    per_file_budget = max(1500, int(RUNTIME.max_evidence_chars * 0.85 / max(1, len(files))))
     evidence: List[str] = []
     for fn in files:  # 穩定輸出順序
+        used = 0
         for (f, label, q, r) in by_file.get(fn, []):
-            evidence.append(f"【{f}｜{label}】\n{_preview(r, 2500)}")
+            snippet = _preview(r, 600)
+            if used + len(snippet) > per_file_budget:
+                continue
+            used += len(snippet)
+            evidence.append(f"【{f}｜{label}】\n{snippet}")
             _trace(resp, "tool_call", step=2, tool="search_knowledge_base",
                    args={"file_name": f, "search_query": q}, result_preview=_preview(r))
 

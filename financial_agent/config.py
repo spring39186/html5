@@ -60,9 +60,10 @@ class RuntimeConfig:
     request_timeout: int = int(os.getenv("FA_REQUEST_TIMEOUT", "240"))
     # 餵給總結 agent 的證據總長度上限（字元），避免輸入過大導致超慢。
     max_evidence_chars: int = int(os.getenv("FA_MAX_EVIDENCE_CHARS", "16000"))
-    # OCR 正規化語言：預設 "en" → 解析後把每頁統一翻成英文再入庫（跨多國語言文件，
-    # 大幅減少跨語言檢索與整合漏資料的問題）。設成 "" 可關閉。
-    normalize_lang: str = os.getenv("FA_NORMALIZE_LANG", "en")
+    # OCR 正規化語言：預設 ""（關閉）。改用 bge-m3 等跨語言 embedding 後，
+    # 不必再把每頁翻成英文——dense 向量本身就能跨語言召回，省下大量翻譯成本並保留原文精度。
+    # 若改用非跨語言的 embedding 想回到「翻英入庫」，設 FA_NORMALIZE_LANG=en 即可。
+    normalize_lang: str = os.getenv("FA_NORMALIZE_LANG", "")
     # confidence 門檻：高於此值才允許走 fast-path 直接回答
     fastpath_confidence: float = float(os.getenv("FA_FASTPATH_CONF", "0.7"))
 

@@ -554,8 +554,14 @@ def search_knowledge_base(args: dict, file_registry: dict) -> str:
 def _hybrid_search(search_query: str, file_name: Optional[str],
                    where_filter: Optional[dict], n_results: int) -> str:
     """混合檢索：查詢翻英+擴展 → Chroma dense + BM25 → RRF（+可選 rerank）。"""
+    # 生產級 RAG（FA_RAG_V2）：query rewrite + HyDE → 多子查詢 hybrid → RRF 融合 → rerank
+    if RUNTIME.use_rag_v2:
+        try:
+            return _rag_v2_search(search_query, file_name, where_filter, n_results)
+        except Exception as e:  # noqa: BLE001
+            print(f"⚠️ RAG v2 失敗，回退一般混合檢索: {e}")
+
     from query_processing import translate_and_expand_query
-    from retrieval import HybridRetriever
 
     def _llm(messages, temperature=0.1):
         return _chat(MODEL_CONFIG.coder, messages, temperature=temperature)
@@ -565,6 +571,62 @@ def _hybrid_search(search_query: str, file_name: Optional[str],
     expanded = tx.get("expanded_terms", [])
     return _retrieve_and_format(eng_query, expanded, where_filter, file_name,
                                 n_results, original=search_query)
+
+
+# ── 生產級 RAG（rag.py）的注入依賴 ──
+def _dense_search(query: str, n: int, where_filter: Optional[dict] = None) -> List[dict]:
+    """單純 Chroma 向量檢索，回傳 hit 清單（給 rag.rag_search 當 dense 來源）。"""
+    raw = collection.query(query_texts=[query], n_results=n, where=where_filter,
+                           include=["documents", "metadatas", "distances"])
+    ids = (raw.get("ids") or [[]])[0]
+    docs = (raw.get("documents") or [[]])[0]
+    metas = (raw.get("metadatas") or [[]])[0]
+    dists = (raw.get("distances") or [[]])[0]
+    return [{"id": i, "text": d, "metadata": m, "score": max(0.0, 1.0 - dist)}
+            for i, d, m, dist in zip(ids, docs, metas, dists)]
+
+
+_CROSS_ENCODER = None  # 惰性快取的 cross-encoder（bge-reranker-large）
+
+
+def _cross_encode(query: str, passages: List[str]) -> List[float]:
+    global _CROSS_ENCODER
+    if _CROSS_ENCODER is None:
+        from sentence_transformers import CrossEncoder
+        _CROSS_ENCODER = CrossEncoder(RUNTIME.rerank_model)
+    scores = _CROSS_ENCODER.predict([(query, p) for p in passages])
+    return [float(s) for s in scores]
+
+
+def _rag_v2_search(search_query: str, file_name: Optional[str],
+                   where_filter: Optional[dict], n_results: int) -> str:
+    from rag import rag_search, RagConfig, RagDeps
+    cfg = RagConfig(
+        max_subqueries=RUNTIME.rag_max_subqueries,
+        dense_candidates=RUNTIME.rag_dense_candidates,
+        top_k=n_results,
+        rerank_top_n=RUNTIME.rag_rerank_top_n,
+        use_hyde=RUNTIME.rag_use_hyde,
+        use_rerank=bool(RUNTIME.rerank_model),
+    )
+    deps = RagDeps(
+        llm_call=lambda m, t=0.1: _chat(MODEL_CONFIG.coder, m, temperature=t),
+        dense_search=_dense_search,
+        cross_encode=(_cross_encode if RUNTIME.rerank_model else None),
+    )
+    result = rag_search(search_query, deps, cfg, where_filter=where_filter)
+    hits = result.get("hits", [])
+    if not hits:
+        return f"⚠️ 知識庫中找不到與 '{search_query}' 相關的內容。"
+    blocks = []
+    for r in hits:
+        m = r.get("metadata", {})
+        blocks.append(f"【來源: {m.get('source_file', m.get('file_name', '未知'))} | "
+                      f"區塊 #{m.get('chunk_index', '?')}】\n{r['text']}")
+    print(f"🔎 [RAG v2] '{search_query}' | {file_name or '全域'} | {len(blocks)} 片段"
+          f"{'｜rerank' if RUNTIME.rerank_model else ''}")
+    return (f"🔍 RAG 檢索成功，找到 {len(blocks)} 個片段：\n\n"
+            + "\n\n---\n\n".join(blocks) + "\n\n請只根據以上原文回答，禁止捏造。")
 
 
 def _retrieve_hits(eng_query: str, expanded: List[str],
@@ -584,7 +646,10 @@ def _retrieve_hits(eng_query: str, expanded: List[str],
         return []
     dense_results = [{"id": i, "text": d, "metadata": m, "score": max(0.0, 1.0 - dist)}
                      for i, d, m, dist in zip(ids0, docs0, metas0, dists0)]
-    retriever = HybridRetriever(cross_encoder_name=RUNTIME.rerank_model or None)
+    # 這裡「不」啟用 per-call cross-encoder：本函式會被確定性管線呼叫很多次，
+    # 每次新建 HybridRetriever 會重載 reranker 模型（極慢）。rerank 統一在
+    # FA_RAG_V2 路徑用模組級快取的 _cross_encode 做。
+    retriever = HybridRetriever(cross_encoder_name=None)
     retriever.index([{"id": r["id"], "text": r["text"], "metadata": r["metadata"]}
                      for r in dense_results])
     return retriever.search(eng_query, expanded_terms=expanded,
@@ -898,22 +963,15 @@ def build_gather_system_prompt(plan: PlanningResult, file_list: str) -> str:
 
 【絕對禁止】捏造資料庫中不存在的數據。"""
 
-    # 知識庫已正規化成英文時，必須用英文術語查詢；否則用各檔原文語言
-    if RUNTIME.normalize_lang == "en":
-        search_lang_rule = (
-            "【知識庫語言：英文】所有檔案內容已統一翻成英文入庫，因此 search_query "
-            "「一律用英文財務術語」，不要用中文或日文關鍵字（否則會比對不到）。\n"
-            "   而且每個 query 結尾都「加上 current fiscal year」，以鎖定『本期』數字、"
-            "避免撈到去年比較數。範例：\n"
-            "   - 營收：revenue current fiscal year\n"
-            "   - 營業利益：operating income current fiscal year\n"
-            "   - 淨利：profit attributable to owners of the parent current fiscal year\n"
-            "   - 資本支出：capital expenditure CAPEX current fiscal year\n"
-            "   - EPS：basic earnings per share current fiscal year")
-    else:
-        search_lang_rule = (
-            "請用「該檔案原文語言」的正式用語（中文檔『營業收入』、英文檔『revenue net sales』、"
-            "日文檔『売上収益』），並在結尾加上『當期/本期』以鎖定本期數字。")
+    # 跨語言 embedding（bge-m3）：用英文標準財務術語即可命中各語言內容，且能標準化指標。
+    search_lang_rule = (
+        "【檢索語言】知識庫使用跨語言向量檢索，用「英文標準財務術語」查詢就能命中中／英／日各語言內容，"
+        "且能標準化指標名稱。每個 query 結尾「加上 current fiscal year」以鎖定本期、避免撈到去年比較數。範例：\n"
+        "   - 營收：revenue current fiscal year\n"
+        "   - 營業利益：operating income current fiscal year\n"
+        "   - 淨利：profit attributable to owners of the parent current fiscal year\n"
+        "   - 資本支出：capital expenditure CAPEX current fiscal year\n"
+        "   - EPS：basic earnings per share current fiscal year")
 
     return f"""【前置規劃（由 Planner 提供）】
 - 意圖: {plan.intent.value}

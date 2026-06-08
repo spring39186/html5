@@ -882,6 +882,21 @@ def build_gather_system_prompt(plan: PlanningResult, file_list: str) -> str:
 
 【絕對禁止】捏造資料庫中不存在的數據。"""
 
+    # 知識庫已正規化成英文時，必須用英文術語查詢；否則用各檔原文語言
+    if RUNTIME.normalize_lang == "en":
+        search_lang_rule = (
+            "【知識庫語言：英文】所有檔案內容已統一翻成英文入庫，因此 search_query "
+            "「一律用英文財務術語」，不要用中文或日文關鍵字（否則會比對不到）。例如：\n"
+            "   - 營收：revenue / net sales\n"
+            "   - 營業利益：operating income / operating profit\n"
+            "   - 淨利：profit attributable to owners of the parent / net income\n"
+            "   - 資本支出：capital expenditure / CAPEX\n"
+            "   - EPS：earnings per share / basic EPS")
+    else:
+        search_lang_rule = (
+            "請用「該檔案原文語言」的正式用語（中文檔『營業收入』、英文檔『revenue net sales』、"
+            "日文檔『売上収益』；淨利同理）。")
+
     return f"""【前置規劃（由 Planner 提供）】
 - 意圖: {plan.intent.value}
 - 步驟: {' → '.join(plan.steps)}
@@ -897,10 +912,8 @@ def build_gather_system_prompt(plan: PlanningResult, file_list: str) -> str:
 2. 跨檔案：對「每個檔案」分別 search_knowledge_base，指定 file_name。
 3. 需要歷史資料庫：先 get_database_schema 看結構 → 再 run_sql_query 產生 SELECT 取數。
 4. 【關鍵：精準檢索】不要把多個指標、多種語言塞進同一個 search_query（會讓檢索失焦）。
-   請「一個指標一次查詢」，並用「該檔案原文語言」的正式用語：
-   - 營收：中文檔用「營業收入 綜合收益總額」、英文檔用「revenue net sales」、日文檔用「売上収益」
-   - 淨利：中文「母公司擁有人應佔溢利」、英文「profit attributable to owners」、日文「親会社の所有者に帰属する当期利益」
-   - 也務必查「合併財務摘要 / Consolidated Results / 連結業績」這類彙總表，數字通常在那裡。
+   請「一個指標一次查詢」。{search_lang_rule}
+   - 也務必查「Consolidated Results / Financial Summary」這類彙總表，數字通常在那裡。
 5. 每個檔案的每個關鍵指標都要確認有撈到「實際數值」；若某指標沒撈到，換用語再查一次。
 6. 證據撈足後，直接回覆「收集完成」即可，不要長篇大論。
 
@@ -934,6 +947,8 @@ SYNTHESIS_SYSTEM_PROMPT = """你是首席財務分析師（總結整合 agent）
   (2) 「去年比較數」只用來對照或補洞，絕不可把比較年度當成獨立分析年度
       （例：2023 報告裡附的 2022 數字，不要把 2022 列成一個分析年度）。
   (3) 同一年度若多份報告都有，數字應一致；以該年度為『本期』的那份報告為準。
+  (4) 【所有指標年度一致】營收、營業利益、淨利、EPS… 等「全部指標都必須使用同一組分析年度」，
+      不可營收用 2023-2025、淨利卻用 2022-2024。先決定這組年度，再讓每個指標、每張圖都對齊它。
 - 【單位一致】不同來源可能用不同單位（億日圓 / 百萬日圓 / 兆日圓；億元 等）。
   比較或畫圖前，務必先「換算成同一單位」，並在報告中標明所用單位；
   例：2,766,557 百萬日圓 = 約 2.77 兆日圓 = 27,665 億日圓。換算錯誤等同捏造，請特別小心。

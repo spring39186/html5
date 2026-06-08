@@ -1027,20 +1027,26 @@ def _gather_files_deterministic(user_prompt: str, file_registry: dict,
     print(f"  🔎 [Retrieve] 每檔 {len(_STD_METRIC_QUERIES)} 項指標，{RUNTIME.gather_workers} 路並行…")
 
     def _search_one_file(fn: str):
-        """對單一檔案跑所有指標查詢，依 chunk id 去重，保留『完整片段』（不硬切）。"""
-        seen = {}  # chunk_id -> 完整片段文字（保持首次出現＝最相關的順序）
+        """對單一檔案跑所有指標查詢；round-robin 取片段，確保每個指標(尤其EPS)的最佳片段都進得來。"""
+        metric_hits = []
         for label, q in _STD_METRIC_QUERIES:
             try:
                 hits = _retrieve_hits(q, [], {"file_name": fn}, n_results=3)
             except Exception:  # noqa: BLE001
                 hits = []
-            for h in hits:
-                cid = h.get("id")
-                if cid and cid not in seen:
-                    seen[cid] = h.get("text", "")
+            metric_hits.append(hits)
             _trace(resp, "tool_call", step=2, tool="search_knowledge_base",
                    args={"file_name": fn, "search_query": q},
                    result_preview=_preview(str([h.get("id") for h in hits])))
+        # round-robin：先收各指標的 rank0，再 rank1…，並依 chunk id 去重
+        seen = {}
+        for rank in range(max((len(h) for h in metric_hits), default=0)):
+            for hits in metric_hits:
+                if rank < len(hits):
+                    h = hits[rank]
+                    cid = h.get("id")
+                    if cid and cid not in seen:
+                        seen[cid] = h.get("text", "")
         return fn, seen
 
     workers = max(1, min(len(files), RUNTIME.gather_workers))
@@ -1050,7 +1056,7 @@ def _gather_files_deterministic(user_prompt: str, file_registry: dict,
             seen_by_file[fn] = seen
 
     # 每檔均衡預算；只「整段取捨」（去重後的完整片段），不從中間硬切，避免切斷數字
-    per_file_budget = max(1500, int(RUNTIME.max_evidence_chars * 0.85 / max(1, len(files))))
+    per_file_budget = max(2000, int(RUNTIME.max_evidence_chars * 0.9 / max(1, len(files))))
     evidence: List[str] = []
     for fn in files:  # 穩定輸出順序
         used = 0
@@ -1198,10 +1204,14 @@ def _needs_metric_extraction(user_prompt: str, plan: PlanningResult, want_viz: b
 _METRIC_EXTRACT_SYSTEM = """你是嚴謹的財務數據抽取器。從證據中抽出使用者需要的「各年度 × 指標」數值。
 
 【鐵則】
-- 每份報告以『本期年度(current fiscal year)』為準：判讀線索如「year ended August 31, 2025」、
-  「FYE Aug 2025」、「Current Consolidated Fiscal Year (… to August 31, 2025)」、「当期/通期…2025年8月期」。
-  以該欄為該檔的年度數字；「去年比較欄(Prior/前期)」只用來補洞，絕不可當成獨立年度。
-- 涵蓋證據中出現的所有『本期年度』，特別是「最新年度」一定要有，一年都不能漏。
+- 【年度歸屬，最重要】每個數字屬於哪一年，依「欄位/段落上的年度標籤」判讀
+  （如 year ended August 31, 2023 / FYE Aug 2024 / 当期 2025年8月期）。
+  * 某一年的數字，可能出現在某份報告的「本期欄」，也可能出現在另一份報告的「去年比較欄」——
+    只要該欄『標籤是那一年』就可採用，並可跨報告交叉比對（同一年數字應一致）。
+    例：2023 的營收若 2023 報告只有敘述、不清楚，可改用 2024 報告「Year ended Aug 2023」欄的數值。
+  * 但「不要」捏造或多列出證據中根本沒有標籤的年度（例如不要因為某欄是 2022 就硬生出 2022 這一年，
+    除非使用者要的年度範圍包含它）。
+- 涵蓋證據中出現的所有目標年度，特別是「最新年度」一定要有，一年都不能漏。
 - 數值「原樣保留」（例如以百萬日圓表示就照抄 3,400,539），不要換算、不要四捨五入、不要捏造；
   某年某指標查無就填 null。
 - 只輸出 JSON，不要任何說明：

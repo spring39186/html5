@@ -54,7 +54,7 @@ class RuntimeConfig:
     # 單次 LLM 請求逾時（秒）。超過就放棄該次呼叫並走降級，避免整個 app 卡死。
     request_timeout: int = int(os.getenv("FA_REQUEST_TIMEOUT", "240"))
     # 餵給總結 agent 的證據總長度上限（字元），避免輸入過大導致超慢。
-    max_evidence_chars: int = int(os.getenv("FA_MAX_EVIDENCE_CHARS", "12000"))
+    max_evidence_chars: int = int(os.getenv("FA_MAX_EVIDENCE_CHARS", "16000"))
     # OCR 正規化語言：預設 "en" → 解析後把每頁統一翻成英文再入庫（跨多國語言文件，
     # 大幅減少跨語言檢索與整合漏資料的問題）。設成 "" 可關閉。
     normalize_lang: str = os.getenv("FA_NORMALIZE_LANG", "en")

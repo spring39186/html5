@@ -1307,18 +1307,36 @@ def _extract_metrics(user_prompt: str, evidence_text: str, resp: AgentResponse) 
         return None
 
 
+def _evidence_v2_block(evidence: List[str], resp: AgentResponse) -> str:
+    """FA_SYNTH_V2：把證據字串轉成 Evidence → 去重 → token 預算選取 → 編號 [E#] 區塊。"""
+    from evidence import Evidence, select_within_budget, to_prompt_block
+    objs = []
+    for s in evidence:
+        s = str(s)
+        # 從開頭的【來源…】或【檔名｜…】抽出 source 標籤
+        src = "evidence"
+        if s.startswith("【") and "】" in s:
+            src = s[1:s.index("】")][:60]
+        objs.append(Evidence(source=src, query="", content=s, relevance=0.5, type="rag"))
+    selected = select_within_budget(objs, max_tokens=RUNTIME.synth_max_tokens, top_k=12)
+    _trace(resp, "evidence_select", total=len(objs), selected=len(selected),
+           max_tokens=RUNTIME.synth_max_tokens)
+    return to_prompt_block(selected)
+
+
 def _synthesize(user_prompt: str, plan: PlanningResult,
                 evidence: List[str], resp: AgentResponse,
                 want_viz: bool = True) -> dict:
     """整合階段：總結 agent 把證據整合成報告 + 圖表/表格指定（JSON）。"""
-    if evidence:
-        evidence_text = "\n\n========\n\n".join(evidence)
-    else:
+    if not evidence:
         evidence_text = "（收集階段沒有取得任何證據，請在報告中說明資料不足。）"
-
-    # 限制證據總長度，避免輸入過大讓總結模型超慢/逾時
-    if len(evidence_text) > RUNTIME.max_evidence_chars:
-        evidence_text = evidence_text[:RUNTIME.max_evidence_chars] + "\n…（證據過長已截斷）"
+    elif RUNTIME.use_synth_v2:
+        # 證據層升級：去重 + token 預算 + 編號 [E#]（取代粗暴的字元截斷）
+        evidence_text = _evidence_v2_block(evidence, resp)
+    else:
+        evidence_text = "\n\n========\n\n".join(evidence)
+        if len(evidence_text) > RUNTIME.max_evidence_chars:
+            evidence_text = evidence_text[:RUNTIME.max_evidence_chars] + "\n…（證據過長已截斷）"
 
     # 量化任務：先做程式化抽數，得到權威的「年度×指標」表（非量化問題則跳過）
     extracted = None
@@ -1337,8 +1355,13 @@ def _synthesize(user_prompt: str, plan: PlanningResult,
             "涵蓋的年度就是這裡的 years，不可多列或漏列年度：\n"
             f"{json.dumps(extracted, ensure_ascii=False)}\n")
 
+    cite_rule = ("\n【引用紀律】證據已編號 [E1][E2]…。每個有數字的結論盡量在句末標註來源編號（如 [E3]）；"
+                 "只能使用證據（與上方權威數據）中出現的資訊，禁止外部知識或臆測。\n"
+                 if RUNTIME.use_synth_v2 else "")
+
     user_block = (f"【使用者需求】\n{user_prompt}\n\n"
                   f"【視覺化規則】{viz_rule}\n"
+                  f"{cite_rule}"
                   f"{extracted_block}\n"
                   f"【收集到的證據（原文，供補充敘述與佐證）】\n{evidence_text}\n\n"
                   "請整合以上資訊，輸出 JSON（report / charts / tables）。")
@@ -1450,8 +1473,19 @@ def _present_synthesis(synthesis: dict, resp: AgentResponse,
 
     # 視覺化：只有使用者要求時才畫，且一次畫好（同一版面）
     if want_viz:
+        # 圖表正規化（非破壞性）：把 "3,103,836" 轉成數字、丟掉沒有 data 的空圖；
+        # 但「不」因為標籤是年份(被視為數字)就丟掉整張圖（年份軸是合法的）。
+        charts = []
+        for c in (synthesis.get("charts", []) or []):
+            if not (isinstance(c, dict) and c.get("data")):
+                continue
+            try:
+                from chart_schema import normalize_chart
+                charts.append(normalize_chart(c))
+            except Exception:  # noqa: BLE001
+                charts.append(c)
         try:
-            _render_charts(synthesis.get("charts", []), resp)
+            _render_charts(charts, resp)
         except Exception as e:  # noqa: BLE001
             print(f"  ⚠️ 圖表生成失敗: {e}")
 

@@ -120,6 +120,9 @@ class RuntimeConfig:
     rag_dense_candidates: int = int(os.getenv("FA_RAG_DENSE_CAND", "20"))
     rag_rerank_top_n: int = int(os.getenv("FA_RAG_RERANK_TOPN", "20"))
     rag_use_hyde: bool = _bool_env("FA_RAG_HYDE", "1")   # HyDE 假設答案召回，預設開
+    # 證據整合升級：evidence 去重 + token 預算 + 整合器引用紀律 + 圖表 schema 驗證
+    use_synth_v2: bool = _bool_env("FA_SYNTH_V2")
+    synth_max_tokens: int = int(os.getenv("FA_SYNTH_MAX_TOKENS", "3000"))
 
 
 MODEL_CONFIG = ModelConfig()

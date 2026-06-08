@@ -119,6 +119,7 @@ class AgentResponse:
     planning_result: Optional[dict] = None
     route: str = ""
     executed_sql: List[str] = field(default_factory=list)  # 本輪實際執行的 SQL（供對話記憶）
+    plotly_jsons: List[str] = field(default_factory=list)  # 互動式 Plotly 圖（FA_PLOTLY 開啟時）
     trace: List[dict] = field(default_factory=list)  # 完整執行軌跡（供下載/優化）
 
 
@@ -372,72 +373,114 @@ def parse_financial_pdf(args: dict, file_registry: dict) -> str:
         available = ", ".join(file_registry.keys()) if file_registry else "無"
         return f"❌ 找不到檔案 '{file_name}'。可用檔案: {available}"
 
-    cache_file = _cache_path(pdf_path)
-    if os.path.exists(cache_file):
-        print(f"🔄 [Cache Hit] {cache_file}")
-        with open(cache_file, "r", encoding="utf-8") as f:
-            full_text = f.read()
+    normalize = (RUNTIME.normalize_lang == "en")
+
+    if RUNTIME.concurrent_ocr:
+        # 並發 OCR + 逐頁翻譯（content-hash 快取由 ocr_pipeline 內部處理）
+        from ocr_pipeline import process_pdf, TRANSLATION_SYSTEM_PROMPT
+
+        def _ocr_call(p: int, img_bytes: bytes) -> str:
+            b64 = base64.b64encode(img_bytes).decode()
+            return _chat(MODEL_CONFIG.vision,
+                [{"role": "user", "content": [
+                    {"type": "text", "text": f"這是 PDF 第 {p + 1} 頁。請完整轉成 Markdown，"
+                                             f"保留所有表格、數字與文字，不可遺漏任何數據。"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                ]}], temperature=0.0, max_tokens=4096)
+
+        def _translate_call(p: int, md: str) -> str:
+            if not normalize or len(md.strip()) < 20:
+                return md
+            return _chat(MODEL_CONFIG.coder,
+                [{"role": "system", "content": TRANSLATION_SYSTEM_PROMPT},
+                 {"role": "user", "content": md}], temperature=0.1)
+
+        try:
+            full_text = process_pdf(pdf_path, _ocr_call, _translate_call,
+                                    normalize=normalize, cache_dir=RUNTIME.cache_dir)
+        except Exception as e:  # noqa: BLE001
+            return f"❌ OCR 解析失敗: {e}"
         total_pages = full_text.count("## 第") or 1
     else:
-        print(f"🔍 [Cache Miss] 全頁 OCR: {pdf_path}")
-        try:
-            doc = fitz.open(pdf_path)
-        except Exception as e:  # noqa: BLE001
-            return f"❌ 無法開啟 PDF: {e}"
-
-        total_pages = len(doc)  # 先存起來，避免 close 後再讀
-        pages_text = []
-        for page_num in range(total_pages):
-            print(f"  📄 解析第 {page_num + 1}/{total_pages} 頁...")
-            try:
-                page = doc.load_page(page_num)
-                pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5))
-                img_b64 = base64.b64encode(pix.tobytes("png")).decode()
-                content = _chat(
-                    MODEL_CONFIG.vision,
-                    [{"role": "user", "content": [
-                        {"type": "text", "text":
-                            f"這是 PDF 第 {page_num + 1} 頁。請完整轉成 Markdown，"
-                            f"保留所有表格、數字與文字，不可遺漏任何數據。"},
-                        {"type": "image_url",
-                         "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
-                    ]}],
-                    temperature=0.0,
-                    max_tokens=4096,
-                )
-            except Exception as e:  # noqa: BLE001
-                # 單頁失敗不拖垮整份，標記後繼續
-                content = f"_（第 {page_num + 1} 頁解析失敗：{e}）_"
-            pages_text.append(f"## 第 {page_num + 1} 頁\n\n{content}")
-
-        full_text = "\n\n---\n\n".join(pages_text)
-        doc.close()
-        with open(cache_file, "w", encoding="utf-8") as f:
-            f.write(full_text)
-
-    # 選用：統一翻成英文再入庫（跨多國語言文件，提升檢索與整合一致性）
-    if RUNTIME.normalize_lang == "en":
-        norm_cache = cache_file + ".en.md"
-        if os.path.exists(norm_cache):
-            print(f"🔄 [Norm Cache] {norm_cache}")
-            with open(norm_cache, "r", encoding="utf-8") as f:
+        cache_file = _cache_path(pdf_path)
+        if os.path.exists(cache_file):
+            print(f"🔄 [Cache Hit] {cache_file}")
+            with open(cache_file, "r", encoding="utf-8") as f:
                 full_text = f.read()
+            total_pages = full_text.count("## 第") or 1
         else:
-            print(f"🌐 [Normalize→EN] 正在統一語言: {file_name} ...")
-            full_text = _normalize_to_english(full_text)
-            with open(norm_cache, "w", encoding="utf-8") as f:
+            print(f"🔍 [Cache Miss] 全頁 OCR: {pdf_path}")
+            try:
+                doc = fitz.open(pdf_path)
+            except Exception as e:  # noqa: BLE001
+                return f"❌ 無法開啟 PDF: {e}"
+
+            total_pages = len(doc)
+            pages_text = []
+            for page_num in range(total_pages):
+                print(f"  📄 解析第 {page_num + 1}/{total_pages} 頁...")
+                try:
+                    page = doc.load_page(page_num)
+                    pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5))
+                    img_b64 = base64.b64encode(pix.tobytes("png")).decode()
+                    content = _chat(
+                        MODEL_CONFIG.vision,
+                        [{"role": "user", "content": [
+                            {"type": "text", "text":
+                                f"這是 PDF 第 {page_num + 1} 頁。請完整轉成 Markdown，"
+                                f"保留所有表格、數字與文字，不可遺漏任何數據。"},
+                            {"type": "image_url",
+                             "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+                        ]}],
+                        temperature=0.0,
+                        max_tokens=4096,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    content = f"_（第 {page_num + 1} 頁解析失敗：{e}）_"
+                pages_text.append(f"## 第 {page_num + 1} 頁\n\n{content}")
+
+            full_text = "\n\n---\n\n".join(pages_text)
+            doc.close()
+            with open(cache_file, "w", encoding="utf-8") as f:
                 f.write(full_text)
+
+        # 選用：統一翻成英文再入庫
+        if normalize:
+            norm_cache = cache_file + ".en.md"
+            if os.path.exists(norm_cache):
+                print(f"🔄 [Norm Cache] {norm_cache}")
+                with open(norm_cache, "r", encoding="utf-8") as f:
+                    full_text = f.read()
+            else:
+                print(f"🌐 [Normalize→EN] 正在統一語言: {file_name} ...")
+                full_text = _normalize_to_english(full_text)
+                with open(norm_cache, "w", encoding="utf-8") as f:
+                    f.write(full_text)
 
     # 切塊
     print(f"📚 [Vectorizing] {file_name} ...")
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200,
-        separators=["\n## ", "\n### ", "\n\n", "\n", " "],
-    )
-    chunks = splitter.split_text(full_text)
+    if RUNTIME.struct_chunk:
+        # 結構化分塊（表格不跨塊、附豐富 metadata）
+        from chunking import chunk_markdown, infer_doc_metadata
+        base_meta = {"file_name": file_name}
+        base_meta.update(infer_doc_metadata(file_name, full_text))
+        chunk_objs = chunk_markdown(full_text, source_file=file_name, base_metadata=base_meta)
+        chunk_ids = [c["id"] for c in chunk_objs]
+        chunk_docs = [c["text"] for c in chunk_objs]
+        chunk_metas = [c["metadata"] for c in chunk_objs]
+    else:
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200,
+            separators=["\n## ", "\n### ", "\n\n", "\n", " "],
+        )
+        chunks = splitter.split_text(full_text)
+        chunk_ids = [f"{file_name}_chunk_{i}" for i in range(len(chunks))]
+        chunk_docs = chunks
+        chunk_metas = [{"file_name": file_name, "chunk_index": i, "total_chunks": len(chunks)}
+                       for i in range(len(chunks))]
 
-    # 清掉同檔舊 chunk（用實際查詢，不再硬迴圈 range(500)）
+    # 清掉同檔舊 chunk
     try:
         existing = collection.get(where={"file_name": file_name})
         if existing and existing.get("ids"):
@@ -445,16 +488,9 @@ def parse_financial_pdf(args: dict, file_registry: dict) -> str:
     except Exception as e:  # noqa: BLE001
         print(f"  ⚠️ 清理舊 chunk 失敗（可忽略）: {e}")
 
-    collection.add(
-        ids=[f"{file_name}_chunk_{i}" for i in range(len(chunks))],
-        documents=chunks,
-        metadatas=[
-            {"file_name": file_name, "chunk_index": i, "total_chunks": len(chunks)}
-            for i in range(len(chunks))
-        ],
-    )
+    collection.add(ids=chunk_ids, documents=chunk_docs, metadatas=chunk_metas)
     return (f"✅ 檔案 {file_name} 已完成全頁解析！共 {total_pages} 頁，"
-            f"切割成 {len(chunks)} 個知識區塊。請呼叫 search_knowledge_base 檢索數據。")
+            f"切割成 {len(chunk_docs)} 個知識區塊。請呼叫 search_knowledge_base 檢索數據。")
 
 
 def search_knowledge_base(args: dict, file_registry: dict) -> str:
@@ -472,6 +508,13 @@ def search_knowledge_base(args: dict, file_registry: dict) -> str:
 
     if any(kw in search_query for kw in ("比較", "趨勢", "變化", "差異", "對比")):
         n_results = min(n_results + 10, 30)
+
+    # 混合檢索路徑（FA_HYBRID_RETRIEVAL=1）：查詢翻英+擴展 → dense(Chroma)+BM25+RRF
+    if RUNTIME.hybrid_retrieval:
+        try:
+            return _hybrid_search(search_query, file_name, where_filter, n_results)
+        except Exception as e:  # noqa: BLE001
+            print(f"⚠️ 混合檢索失敗，回退純向量檢索: {e}")
 
     print(f"🔍 [Vector Search] '{search_query}' | {file_name or '全域'} | Top-K={n_results}")
     try:
@@ -496,6 +539,55 @@ def search_knowledge_base(args: dict, file_registry: dict) -> str:
         return f"🔍 檢索成功，找到 {len(blocks)} 個片段：\n\n{context}\n\n請只根據以上原文回答，禁止捏造。"
     except Exception as e:  # noqa: BLE001
         return f"❌ 檢索失敗: {e}"
+
+
+def _hybrid_search(search_query: str, file_name: Optional[str],
+                   where_filter: Optional[dict], n_results: int) -> str:
+    """混合檢索：查詢翻英+擴展 → Chroma dense + BM25 → RRF（+可選 rerank）。"""
+    from query_processing import translate_and_expand_query
+    from retrieval import HybridRetriever
+
+    def _llm(messages, temperature=0.1):
+        return _chat(MODEL_CONFIG.coder, messages, temperature=temperature)
+
+    tx = translate_and_expand_query(search_query, _llm)
+    eng_query = tx.get("translated_query", search_query)
+    expanded = tx.get("expanded_terms", [])
+    effective = (eng_query + " " + " ".join(expanded)).strip()
+
+    # dense：取較多候選給 RRF 融合
+    raw = collection.query(
+        query_texts=[effective], n_results=max(n_results, 20),
+        where=where_filter, include=["documents", "metadatas", "distances"],
+    )
+    ids0 = (raw.get("ids") or [[]])[0]
+    docs0 = (raw.get("documents") or [[]])[0]
+    metas0 = (raw.get("metadatas") or [[]])[0]
+    dists0 = (raw.get("distances") or [[]])[0]
+    if not docs0:
+        return f"⚠️ 知識庫中找不到與 '{search_query}' 相關的內容。"
+
+    dense_results = [{"id": i, "text": d, "metadata": m, "score": max(0.0, 1.0 - dist)}
+                     for i, d, m, dist in zip(ids0, docs0, metas0, dists0)]
+
+    retriever = HybridRetriever(cross_encoder_name=RUNTIME.rerank_model or None)
+    retriever.index([{"id": r["id"], "text": r["text"], "metadata": r["metadata"]}
+                     for r in dense_results])
+    out = retriever.search(eng_query, expanded_terms=expanded,
+                           dense_results=dense_results, top_k=n_results)
+    hits = out.get("results", [])
+    if not hits:
+        return f"⚠️ 知識庫中找不到與 '{search_query}' 相關的內容。"
+
+    blocks = []
+    for r in hits:
+        m = r.get("metadata", {})
+        blocks.append(f"【來源: {m.get('source_file', m.get('file_name', '未知'))} | "
+                      f"區塊 #{m.get('chunk_index', '?')}】\n{r['text']}")
+    context = "\n\n---\n\n".join(blocks)
+    print(f"🔍 [Hybrid] '{search_query}'→'{eng_query}' | {file_name or '全域'} | {len(blocks)} 片段")
+    return (f"🔍 混合檢索成功（查詢英譯：{eng_query}），找到 {len(blocks)} 個片段：\n\n"
+            f"{context}\n\n請只根據以上原文回答，禁止捏造。")
 
 
 def get_database_schema(args: dict, file_registry: dict) -> str:
@@ -1003,7 +1095,22 @@ def _render_charts(charts: List[dict], resp: AgentResponse) -> None:
     if not charts:
         return
 
-    # 組出一段「畫一張含多個子圖」的需求，並附上每張子圖的真實數據
+    # 互動式 Plotly 路徑（FA_PLOTLY=1）：產生 plotly 程式碼 → 沙箱執行 → 取 fig.to_json()
+    if RUNTIME.use_plotly:
+        from viz_plotly import generate_plotly
+        def _coder_call(messages, temperature=0.2):
+            return _chat(MODEL_CONFIG.coder, messages, temperature=temperature)
+        titles = "、".join(c.get("title", f"圖{i}") for i, c in enumerate(charts, 1))
+        print(f"  📈 [Coder] 產生互動式 Plotly 圖 ({len(charts)}): {titles}")
+        result = generate_plotly(charts, coder_call=_coder_call,
+                                 run_script_fn=_run_script, max_repair=1)
+        resp.plotly_jsons.extend(result.get("plotly_jsons", []))
+        _trace(resp, "charts", chart_count=len(charts), titles=titles, engine="plotly",
+               code=_preview(result.get("code", ""), 2500),
+               output=_preview(result.get("stdout", "")))
+        return
+
+    # 預設：matplotlib 靜態圖（單一 figure、子圖排版）
     n = len(charts)
     lines = [
         f"請用 matplotlib 在「單一張圖（一個 figure）」中，以子圖 subplots 排版呈現以下 {n} 個圖表。",
@@ -1134,7 +1241,8 @@ def run_financial_agent(user_prompt: str, file_registry: dict = None,
 
     return {
         "report_text": resp.report_text,
-        "figures": [],          # 預留給互動式 Plotly 圖（目前用 images 靜態圖）
+        "figures": [],          # 舊欄位保留相容
+        "plotly_jsons": resp.plotly_jsons,   # 互動式 Plotly 圖（FA_PLOTLY 開啟時）
         "tables": resp.tables,
         "images": resp.images,
         "thought_logs": resp.thought_logs,

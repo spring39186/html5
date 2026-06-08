@@ -56,11 +56,17 @@ class RuntimeConfig:
     fastpath_confidence: float = float(os.getenv("FA_FASTPATH_CONF", "0.7"))
 
     # ── MCP（讓 agent 當 MCP client 查資料庫）──
-    # FA_USE_MCP=1 開啟後，agent 會連到下列 MCP server，把它的工具併入可用工具。
-    # 預設指向本地 mock server；要接真實 MSSQL MCP server 時改這兩個環境變數即可。
     use_mcp: bool = os.getenv("FA_USE_MCP", "0").lower() in ("1", "true", "yes", "on")
     mcp_command: str = os.getenv("FA_MCP_COMMAND", "python")
     mcp_args: str = os.getenv("FA_MCP_ARGS", "mcp_server_mssql.py")  # 以空白分隔
+
+    # ── Production refactor 功能開關（全部預設關閉，開啟才啟用新模組，確保零破壞）──
+    hybrid_retrieval: bool = os.getenv("FA_HYBRID_RETRIEVAL", "0").lower() in ("1", "true", "yes", "on")  # retrieval.py + query_processing.py
+    use_plotly: bool = os.getenv("FA_PLOTLY", "0").lower() in ("1", "true", "yes", "on")                  # viz_plotly.py（互動圖）
+    concurrent_ocr: bool = os.getenv("FA_CONCURRENT_OCR", "0").lower() in ("1", "true", "yes", "on")      # ocr_pipeline.py（並發OCR）
+    struct_chunk: bool = os.getenv("FA_STRUCT_CHUNK", "0").lower() in ("1", "true", "yes", "on")          # chunking.py（結構化分塊）
+    use_graph: bool = os.getenv("FA_USE_GRAPH", "0").lower() in ("1", "true", "yes", "on")                # graph.py（LangGraph 編排）
+    rerank_model: str = os.getenv("FA_RERANK_MODEL", "")  # 設 cross-encoder 名稱才啟用 rerank（如 BAAI/bge-reranker-base）
 
 
 MODEL_CONFIG = ModelConfig()

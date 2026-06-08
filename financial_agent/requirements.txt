@@ -7,3 +7,14 @@ langchain-text-splitters>=0.2
 chromadb>=0.5
 matplotlib>=3.8
 streamlit>=1.35
+
+# ── Production refactor 選用相依（只有開啟對應 FA_* 旗標才需要）──
+# 混合檢索 FA_HYBRID_RETRIEVAL：
+rank-bm25>=0.2          # BM25 稀疏檢索（缺少時 retrieval.py 用純 Python fallback）
+tiktoken>=0.7           # 斷詞（缺少時用 regex fallback）
+# 可選 cross-encoder rerank（FA_RERANK_MODEL 設定時）：
+sentence-transformers>=2.2
+# 互動式圖表 FA_PLOTLY：
+plotly>=5.20
+# LangGraph 編排 FA_USE_GRAPH：
+langgraph>=0.2

@@ -78,6 +78,15 @@ class RuntimeConfig:
     deterministic_gather: bool = _bool_env("FA_DETERMINISTIC_GATHER")
     gather_workers: int = int(os.getenv("FA_GATHER_WORKERS", "3"))  # 解析管線檢索階段的並行數
 
+    # ── Production multilingual RAG（rag.py）＋ 成本控制（預設關閉/保守）──
+    use_rag_v2: bool = _bool_env("FA_RAG_V2")            # 啟用 rag_search（query rewrite→hybrid→fuse→rerank）
+    kb_fusion: bool = _bool_env("FA_KB_FUSION")          # 入庫同時保留原文 + 英文 chunk（跨語言召回）
+    rag_max_subqueries: int = int(os.getenv("FA_RAG_MAX_SUBQ", "3"))
+    rag_top_k: int = int(os.getenv("FA_RAG_TOP_K", "8"))
+    rag_dense_candidates: int = int(os.getenv("FA_RAG_DENSE_CAND", "20"))
+    rag_rerank_top_n: int = int(os.getenv("FA_RAG_RERANK_TOPN", "20"))
+    rag_use_hyde: bool = _bool_env("FA_RAG_HYDE", "1")   # HyDE 假設答案召回，預設開
+
 
 MODEL_CONFIG = ModelConfig()
 RUNTIME = RuntimeConfig()

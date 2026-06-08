@@ -1,0 +1,552 @@
+一、最大結構問題：你的系統其實「過度雙層 agent 化」
+你現在是：
+
+
+Planner（意圖）
+
+Router（規則）
+
+Gather Agent（工具 agent）
+
+Synth Agent（總結 agent）
+
+Coder Agent（畫圖 agent）
+
+Tool Dispatcher（工具層）
+
+MCP layer（外部工具）
+👉 問題不是太多，而是：
+
+Gather + Synth 已經在做 LLM agent loop，但你又在 prompt 裡強約束它 → 會互相打架
+🔥 建議（很重要）
+把系統簡化成三層就好：
+
+Planner（一次）
+↓
+Executor（tool loop）
+↓
+Synthesizer（一次）
+
+然後：
+
+
+❌ Gather 不要再“自己決策多輪工具策略”
+
+✔ 改成 deterministic tool runner（像 pipeline）
+👉 現在 Gather 的問題是：
+
+
+prompt 很長
+
+tool loop 不穩
+
+很容易 over-call search / SQL
+二、最大效能瓶頸：你「OCR + search + LLM」鏈條太重
+❌ 現在問題
+PDF flow：
+
+PDF → vision OCR → markdown → embedding → search → synth → coder → matplotlib
+
+
+這裡最大問題：
+
+1. OCR 每頁都 LLM call（極貴 + 慢）
+
+MODEL_CONFIG.vision
+
+
+👉 這是你最重成本點
+✔ 建議優化（很關鍵）
+🔥 改成 3-tier OCR
+1. layout OCR（便宜）
+2. LLM OCR（只做表格/難頁）
+3. fallback vision（最後才用）
+
+或者更直接：
+👉 只對「疑似財報頁」做 vision OCR
+例如：
+
+
+if contains_table_or_number_density(page):
+    use_vision()
+else:
+    use_pdf_text_extract()
+
+三、RAG 設計問題：你現在是「over-retrieval + over-context」
+你現在：
+
+
+search_knowledge_base → top_k 25~30
+
+gather evidence 不截斷語義
+
+synthesis 再塞全部
+👉 會導致：
+
+LLM 在 synth 階段其實在「讀垃圾堆」
+✔ 改進（非常重要）
+🔥 1. Evidence 必須分級
+現在是：
+
+evidence: List[str]
+
+
+改成：
+
+
+@dataclass
+class Evidence:
+    source: str
+    query: str
+    content: str
+    relevance: float
+    type: Literal["sql", "rag", "ocr"]
+
+🔥 2. synth 只吃：
+Top-K = 8~12（不是 30）
+
+
+你現在：
+
+
+max_evidence_chars = RUNTIME.max_evidence_chars
+
+
+👉 建議改成：
+
+token budget control
+
+
+而不是 char cut
+🔥 3. 加 “Evidence dedup”
+你現在同一段內容可能：
+
+
+search 出現
+
+sql 出現
+
+OCR 出現
+👉 會重複餵 LLM
+四、Gather Agent 最大問題：prompt engineering overload
+你現在 gather prompt：
+
+
+很長
+
+規則很多
+
+還包含語言策略 + 查詢策略 + fallback
+👉 這會導致：
+
+model attention 被規則污染 → tool selection drift
+✔ 建議拆 2 層
+Layer 1（硬規則，不給 LLM）
+
+tool_policy.py
+
+
+例如：
+
+
+database_query → 必走 SQL
+
+file_analysis → 必 OCR + search
+
+visualization → only after evidence ready
+Layer 2（LLM only decides）
+只做：
+
+你要查什麼？（query decomposition）
+
+
+不要再讓它決定 tool ordering
+五、你現在最大 hidden bug：tool loop 沒有 stopping condition control
+你現在：
+
+
+for step in range(max_steps):
+
+
+但 stop 條件是：
+
+
+if not msg.tool_calls:
+    break
+
+👉 問題：
+
+❌ model 可能：
+
+一直 tool call search
+
+或 SQL retry loop
+
+或 OCR fallback loop
+✔ 建議加 hard control
+🔥 tool budget system
+
+tool_budget = {
+    "parse_financial_pdf": 3,
+    "search_knowledge_base": 5,
+    "run_sql_query": 3
+}
+
+每次 decrement
+六、Synthesizer 最大問題：chart generation 太自由
+現在：
+
+
+charts: List[dict]
+
+
+但 model 自己決定：
+
+
+chart type
+
+data structure
+👉 很容易：
+
+
+格式不一致
+
+data shape error
+
+coder 再修一次
+✔ 建議加 schema validation
+例如：
+
+
+ChartData(BaseModel):
+    title: str
+    chart_type: Literal["line","bar","pie"]
+    data: List[Dict[str, float]]
+
+👉 不合法直接 retry synth
+七、你現在其實缺一個「Memory Layer」（很重要）
+你有：
+
+
+history（短期）
+
+executed_sql（log）
+但缺：
+
+❌ 沒有 semantic memory
+✔ 建議加：
+
+conversation_memory:
+    - user intent patterns
+    - previous financial entities
+    - resolved file mappings
+
+用途：
+
+
+避免重 parse PDF
+
+避免重 SQL schema call
+
+支援 follow-up query（你現在只 partially support）
+八、最大架構升級建議（如果你要做 production）
+我會建議你往這個方向收斂：
+
+⭐ 最終架構（clean version）
+                ┌──────────────┐
+                │   Planner    │  (1 call)
+                └──────┬───────┘
+                       ↓
+        ┌─────────────────────────┐
+        │   Deterministic Router  │
+        └──────────┬──────────────┘
+                   ↓
+        ┌─────────────────────────┐
+        │  Tool Executor (loop)   │  ← NO LLM logic inside
+        └──────────┬──────────────┘
+                   ↓
+        ┌─────────────────────────┐
+        │   Synthesizer (1 call)  │
+        └──────────┬──────────────┘
+                   ↓
+        ┌─────────────────────────┐
+        │   Code / Plot runner    │
+        └─────────────────────────┘
+
+九、一句總結你現在系統的核心問題
+如果要一句話講：
+
+你不是「agent 不夠聰明」，而是「agent 太多層，每層都在做 decision making」
+如果你想下一步升級（我可以幫你做）
+我可以幫你往這幾個方向再升一版：
+
+🚀 A. 幫你做「token cost reduction 50%版」
+
+OCR lazy load
+
+RAG top-k compression
+
+synth evidence pruning
+🚀 B. 幫你做「tool loop deterministic化」
+
+去掉 gather agent
+
+改 planner → executor DSL
+🚀 C. 幫你做「production-grade agent runtime」
+
+tracing UI
+
+replay system
+
+tool audit log 
+
+很好，你現在其實要的不是「建議」，而是可以直接交付工程師改的 prompt + 架構重寫版本。
+我幫你把你那一整段分析落地成「可實作的系統 prompt（替換現有 planner / gather / synth）」，並且符合你要的：
+
+✔ 三層架構
+✔ Gather 不再是 agent loop
+✔ OCR 不強制財報化
+✔ RAG 不 over-context
+✔ tool loop deterministic
+✅ ① Planner Prompt（精簡 + 只做決策，不做流程設計）
+👉 替換你現在 PLANNING_SYSTEM_PROMPT
+
+你是一個任務意圖分類器，只負責「分類與初步拆解」，禁止設計工具流程。
+
+【輸出 JSON】
+{
+  "intent": "...",
+  "confidence": 0-1,
+  "requires_files": true/false,
+  "requires_rag": true/false,
+  "requires_sql": true/false,
+  "requires_ocr": true/false,
+  "requires_visualization": true/false,
+  "query_focus": ["核心查詢點1", "核心查詢點2"]
+}
+
+---
+
+【允許 intent】
+chat
+file_analysis
+multi_file
+financial_qa
+database_query
+visualization
+translation
+
+---
+
+【規則】
+
+1. 你不能決定工具順序
+2. 你不能寫 steps
+3. 不確定 → confidence 降低
+4. 所有「查資料」行為只輸出 requires_* flags
+
+---
+
+【關鍵規則】
+
+- file_analysis ≠ visualization
+- visualization 必須獨立 flag
+- file_analysis 一定優先於 database_query（除非明確說查DB）
+- 不要推測資料存在與否
+✅ ② Router（完全 deterministic，不再用 LLM）
+👉 直接替換你 route_by_intent
+
+def route(plan):
+    if plan["requires_files"]:
+        return "tool_pipeline"
+
+    if plan["requires_sql"] and not plan["requires_files"]:
+        return "tool_pipeline"
+
+    if plan["requires_visualization"]:
+        return "tool_pipeline"
+
+    if plan["intent"] == "translation":
+        return "fast_translate"
+
+    if plan["intent"] == "chat" and plan["confidence"] > 0.75:
+        return "fast_chat"
+
+    return "tool_pipeline"
+✅ ③ Tool Executor Prompt（重點：完全去 agent 化）
+👉 這是你最大改動點（取代 Gather Agent）
+
+❌ 你現在問題
+Gather agent 在「自己決定查什麼」
+prompt 很長
+tool loop 不穩
+search / SQL over-call
+✅ 新版本：Tool Executor Prompt（DSL 化）
+你是「工具執行器」，不是思考者。
+
+你的任務是：
+👉 根據指令逐步執行工具
+👉 不做推理
+👉 不決定策略
+👉 不做總結
+
+---
+
+【輸出規則】
+只允許 tool call，不允許自然語言回答。
+
+---
+
+【執行順序規則（硬編碼）】
+
+如果 file_analysis：
+1. parse_financial_pdf（若尚未解析）
+2. search_knowledge_base（逐 query）
+
+如果 database_query：
+1. get_database_schema
+2. run_sql_query
+
+如果 visualization：
+1. 必須等待 evidence 完成後再觸發
+
+---
+
+【禁止】
+- 不得自行新增 query
+- 不得合併多個 search
+- 不得推測缺失資料
+- 不得總結結果
+✅ ④ Gather → 被完全移除（重點）
+你原本 Gather：
+❌ agent loop
+❌ tool decision
+❌ prompt 巨大
+❌ search / OCR / SQL 混在一起
+👉 新設計：
+Gather = Python deterministic pipeline
+
+def gather(plan, user_prompt):
+
+    evidence = []
+
+    if plan.requires_files:
+        evidence += parse_all_files()
+
+        for q in plan["query_focus"]:
+            evidence += search_kb(q)
+
+    if plan.requires_sql:
+        schema = get_schema()
+        sql = generate_sql(user_prompt)
+        evidence += run_sql(sql)
+
+    return evidence
+✅ ⑤ Synthesizer Prompt（核心升級）
+👉 替換 SYNTHESIS_SYSTEM_PROMPT
+
+你是首席分析師，但你只能「基於證據寫報告」。
+
+---
+
+【輸入】
+- 使用者需求
+- 已整理證據（已去重、已排序）
+
+---
+
+【輸出 JSON】
+{
+  "report": "...",
+  "tables": [],
+  "charts": []
+}
+
+---
+
+【鐵則】
+
+1. 不可使用外部知識
+2. 不可補數據
+3. 不可重組資料來源語意
+4. 不可重複證據內容
+
+---
+
+【證據使用規則】
+
+- 每個結論必須引用至少 1 條 evidence
+- evidence 不足 → 明確寫「資料不足」
+- charts 必須來自 evidence 的數值
+
+---
+
+【重要】
+
+你不是分析師 + 搜尋者  
+你只是「證據整合器」
+✅ ⑥ OCR Prompt（你最關鍵優化點）
+👉 解決你說的：
+
+❌ 不要只對疑似財報頁 OCR
+✔ 新 OCR Prompt（完全通用）
+你是一個文件轉寫模型。
+
+你的任務是：
+👉 忠實轉換圖片為文字，不做分類、不做推測、不做簡化。
+
+---
+
+【核心規則】
+
+1. 不可判斷是否財報
+2. 不可決定重要性
+3. 不可刪減任何內容
+4. 不可推測缺失數據
+
+---
+
+【輸出原則】
+
+- 文字 → 原樣保留
+- 表格 → 還原為 markdown table
+- 圖表 → 描述可見元素（不推測數值）
+- 不確定 → 標記 [unclear]
+
+---
+
+【禁止】
+
+❌ 財報重構
+❌ 自動分類（income statement / balance sheet）
+❌ 補數據
+❌ 推理內容
+🚀 最終架構（你真正要的 clean version）
+你原本：
+
+Planner
+Router
+Gather Agent (LLM loop ❌)
+Synth Agent
+Coder
+OCR LLM per page
+✔ 改成：
+Planner (LLM once)
+        ↓
+Router (deterministic)
+        ↓
+Tool Executor (python pipeline, NO LLM logic)
+        ↓
+Synthesizer (LLM once)
+        ↓
+Coder (optional only for charts)
+🎯 一句話總結你的升級核心
+你不是要更強 agent，而是要「去 agent 化 tool layer」
+如果你下一步要升級，我可以幫你做這個👇
+我可以直接幫你再往 production 版本推：
+
+🚀 1. token cost ↓ 50% 版本
+🚀 2. RAG compression layer（避免垃圾 context）
+🚀 3. OCR hybrid routing（真正省錢版）
+🚀 4. tool trace + replay debug system
+只要你說一句：「我要 production version」，我可以幫你收斂成企業級架構。

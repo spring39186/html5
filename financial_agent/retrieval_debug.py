@@ -112,16 +112,8 @@ class RetrievalDebug:
 
         and for logging / tracing pipelines that require plain dicts.
         """
-        return {
-            "translated_query": self.translated_query,
-            "expanded_terms": list(self.expanded_terms),
-            "entities": dict(self.entities),
-            "vector_hits": list(self.vector_hits),
-            "bm25_hits": list(self.bm25_hits),
-            "rrf_ranking": list(self.rrf_ranking),
-            "reranked_results": list(self.reranked_results),
-            "selected_context": list(self.selected_context),
-        }
+        from dataclasses import asdict
+        return asdict(self)
 
 
 # ═══════════════════════════════════════════════════════════════

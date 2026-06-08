@@ -17,6 +17,12 @@
 import os
 from dataclasses import dataclass
 
+
+def _bool_env(name: str, default: str = "0") -> bool:
+    """統一的環境變數布林解析（避免各處複製 in ("1","true","yes","on")）。"""
+    return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
 # 一鍵把主要文字角色都設成同一顆模型，徹底消除「換模型載入」抖動。
 # 例如：set FA_MODEL=qwen3.6:27b  → planner/executor/synthesizer/coder/chat 全用它。
 # （vision 仍維持 glm-ocr，因為 OCR 需要視覺模型。）
@@ -56,16 +62,16 @@ class RuntimeConfig:
     fastpath_confidence: float = float(os.getenv("FA_FASTPATH_CONF", "0.7"))
 
     # ── MCP（讓 agent 當 MCP client 查資料庫）──
-    use_mcp: bool = os.getenv("FA_USE_MCP", "0").lower() in ("1", "true", "yes", "on")
+    use_mcp: bool = _bool_env("FA_USE_MCP")
     mcp_command: str = os.getenv("FA_MCP_COMMAND", "python")
     mcp_args: str = os.getenv("FA_MCP_ARGS", "mcp_server_mssql.py")  # 以空白分隔
 
     # ── Production refactor 功能開關（全部預設關閉，開啟才啟用新模組，確保零破壞）──
-    hybrid_retrieval: bool = os.getenv("FA_HYBRID_RETRIEVAL", "0").lower() in ("1", "true", "yes", "on")  # retrieval.py + query_processing.py
-    use_plotly: bool = os.getenv("FA_PLOTLY", "0").lower() in ("1", "true", "yes", "on")                  # viz_plotly.py（互動圖）
-    concurrent_ocr: bool = os.getenv("FA_CONCURRENT_OCR", "0").lower() in ("1", "true", "yes", "on")      # ocr_pipeline.py（並發OCR）
-    struct_chunk: bool = os.getenv("FA_STRUCT_CHUNK", "0").lower() in ("1", "true", "yes", "on")          # chunking.py（結構化分塊）
-    use_graph: bool = os.getenv("FA_USE_GRAPH", "0").lower() in ("1", "true", "yes", "on")                # graph.py（LangGraph 編排）
+    hybrid_retrieval: bool = _bool_env("FA_HYBRID_RETRIEVAL")  # retrieval.py + query_processing.py
+    use_plotly: bool = _bool_env("FA_PLOTLY")                  # viz_plotly.py（互動圖）
+    concurrent_ocr: bool = _bool_env("FA_CONCURRENT_OCR")      # ocr_pipeline.py（並發OCR）
+    struct_chunk: bool = _bool_env("FA_STRUCT_CHUNK")          # chunking.py（結構化分塊）
+    use_graph: bool = _bool_env("FA_USE_GRAPH")                # graph.py（LangGraph 編排）
     rerank_model: str = os.getenv("FA_RERANK_MODEL", "")  # 設 cross-encoder 名稱才啟用 rerank（如 BAAI/bge-reranker-base）
 
 

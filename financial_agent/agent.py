@@ -347,9 +347,7 @@ def _cache_path(pdf_path: str) -> str:
 
 def _normalize_to_english(full_text: str) -> str:
     """把多語言 OCR 內容逐頁翻成英文（保留表格/數字/結構），統一語言以利檢索與整合。"""
-    sys = ("You are a professional financial translator. Translate the following report page "
-           "into English. Keep ALL numbers, dates and markdown tables EXACTLY as-is; only "
-           "translate surrounding text and labels. Output only the translation, no commentary.")
+    from ocr_pipeline import TRANSLATION_SYSTEM_PROMPT  # 共用同一份翻譯指令，避免兩路徑不一致
     out = []
     for sec in full_text.split("\n\n---\n\n"):
         if len(sec.strip()) < 20:
@@ -357,7 +355,7 @@ def _normalize_to_english(full_text: str) -> str:
             continue
         try:
             out.append(_chat(MODEL_CONFIG.coder,
-                             [{"role": "system", "content": sys},
+                             [{"role": "system", "content": TRANSLATION_SYSTEM_PROMPT},
                               {"role": "user", "content": sec}],
                              temperature=0.1))
         except Exception:  # noqa: BLE001
@@ -460,11 +458,11 @@ def parse_financial_pdf(args: dict, file_registry: dict) -> str:
     # 切塊
     print(f"📚 [Vectorizing] {file_name} ...")
     if RUNTIME.struct_chunk:
-        # 結構化分塊（表格不跨塊、附豐富 metadata）
-        from chunking import chunk_markdown, infer_doc_metadata
-        base_meta = {"file_name": file_name}
-        base_meta.update(infer_doc_metadata(file_name, full_text))
-        chunk_objs = chunk_markdown(full_text, source_file=file_name, base_metadata=base_meta)
+        # 結構化分塊（表格不跨塊、附豐富 metadata）；chunk_markdown 內部會自行做
+        # infer_doc_metadata，這裡只需傳 file_name（供清理舊 chunk 的 where 查詢）
+        from chunking import chunk_markdown
+        chunk_objs = chunk_markdown(full_text, source_file=file_name,
+                                    base_metadata={"file_name": file_name})
         chunk_ids = [c["id"] for c in chunk_objs]
         chunk_docs = [c["text"] for c in chunk_objs]
         chunk_metas = [c["metadata"] for c in chunk_objs]
@@ -1095,12 +1093,13 @@ def _render_charts(charts: List[dict], resp: AgentResponse) -> None:
     if not charts:
         return
 
+    titles = "、".join(c.get("title", f"圖{i}") for i, c in enumerate(charts, 1))
+
     # 互動式 Plotly 路徑（FA_PLOTLY=1）：產生 plotly 程式碼 → 沙箱執行 → 取 fig.to_json()
     if RUNTIME.use_plotly:
         from viz_plotly import generate_plotly
         def _coder_call(messages, temperature=0.2):
             return _chat(MODEL_CONFIG.coder, messages, temperature=temperature)
-        titles = "、".join(c.get("title", f"圖{i}") for i, c in enumerate(charts, 1))
         print(f"  📈 [Coder] 產生互動式 Plotly 圖 ({len(charts)}): {titles}")
         result = generate_plotly(charts, coder_call=_coder_call,
                                  run_script_fn=_run_script, max_repair=1)
@@ -1126,7 +1125,6 @@ def _render_charts(charts: List[dict], resp: AgentResponse) -> None:
         )
     task = "\n".join(lines)
 
-    titles = "、".join(c.get("title", f"圖{i}") for i, c in enumerate(charts, 1))
     print(f"  🎨 [Coder] 一次繪製 {n} 張圖於同一版面: {titles}")
     result = run_python_code({"thought_process": task, "code": ""}, {})
     _trace(resp, "charts", chart_count=n, titles=titles,

@@ -62,6 +62,7 @@ import math
 import re
 import unicodedata
 from collections import Counter, defaultdict
+from functools import lru_cache
 from typing import Any
 
 # ═══════════════════════════════════════════════════════════════
@@ -152,12 +153,23 @@ def tokenize(text: str) -> list[str]:
     Falls back to a CJK-aware regex tokenizer when tiktoken is absent.
     """
     try:
-        import tiktoken  # noqa: PLC0415
-        enc = tiktoken.get_encoding("cl100k_base")
+        enc = _get_tiktoken_encoder()
+        if enc is None:
+            return _regex_tokenize(text)
         # Decode each token back to string and lower-case.
         return [enc.decode([tid]).lower() for tid in enc.encode(text)]
-    except (ImportError, Exception):  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         return _regex_tokenize(text)
+
+
+@lru_cache(maxsize=1)
+def _get_tiktoken_encoder():
+    """惰性載入並快取 tiktoken encoder（避免每次 tokenize 都重取）。"""
+    try:
+        import tiktoken  # noqa: PLC0415
+        return tiktoken.get_encoding("cl100k_base")
+    except Exception:  # noqa: BLE001
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -331,9 +343,8 @@ class HybridRetriever:
         dense_ranked: list[str] = [r["id"] for r in dense_results]
 
         # ── 3. Apply filters to candidate pool ───────────────────────
+        # （只在外層 `if filters:` 守衛下被呼叫，故此處不需再判空）
         def _passes_filter(doc_id: str) -> bool:
-            if not filters:
-                return True
             # Look up metadata from index or dense results
             meta: dict = {}
             if doc_id in self._docs:

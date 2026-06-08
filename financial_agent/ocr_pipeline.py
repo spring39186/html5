@@ -58,8 +58,11 @@ def file_hash(path: str) -> str:
     so callers always get a stable, deterministic key.
     """
     try:
+        h = hashlib.sha256()
         with open(path, "rb") as fh:
-            return hashlib.sha256(fh.read()).hexdigest()
+            for block in iter(lambda: fh.read(65536), b""):
+                h.update(block)
+        return h.hexdigest()
     except Exception:  # noqa: BLE001
         try:
             stat = os.stat(path)
@@ -188,10 +191,7 @@ def process_pages(
         # Collect in order — result() blocks until that page is done
         results = [f.result() for f in futures]
 
-    sections = [
-        f"## 第 {p + 1} 頁\n\n{results[p]}"
-        for p in range(num_pages)
-    ]
+    sections = [f"## 第 {p + 1} 頁\n\n{md}" for p, md in enumerate(results)]
     return "\n\n---\n\n".join(sections)
 
 

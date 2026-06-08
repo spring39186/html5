@@ -566,19 +566,11 @@ def _hybrid_search(search_query: str, file_name: Optional[str],
                                 n_results, original=search_query)
 
 
-def _retrieve_en(query_en: str, file_name: Optional[str], n_results: int = 8) -> str:
-    """已是英文的查詢：直接檢索，跳過翻譯（給確定性管線用，省掉大量 LLM 呼叫）。"""
-    where = {"file_name": file_name} if file_name else None
-    return _retrieve_and_format(query_en, [], where, file_name, n_results, original=query_en)
-
-
-def _retrieve_and_format(eng_query: str, expanded: List[str],
-                         where_filter: Optional[dict], file_name: Optional[str],
-                         n_results: int, original: str = "") -> str:
-    """dense(Chroma) + BM25 + RRF（+可選 rerank），組成可讀片段。不含翻譯。"""
+def _retrieve_hits(eng_query: str, expanded: List[str],
+                   where_filter: Optional[dict], n_results: int) -> List[dict]:
+    """dense(Chroma) + BM25 + RRF（+可選 rerank），回傳結構化 hits（不格式化、不翻譯）。"""
     from retrieval import HybridRetriever
     effective = (eng_query + " " + " ".join(expanded)).strip()
-
     raw = collection.query(
         query_texts=[effective], n_results=max(n_results, 20),
         where=where_filter, include=["documents", "metadatas", "distances"],
@@ -588,20 +580,29 @@ def _retrieve_and_format(eng_query: str, expanded: List[str],
     metas0 = (raw.get("metadatas") or [[]])[0]
     dists0 = (raw.get("distances") or [[]])[0]
     if not docs0:
-        return f"⚠️ 知識庫中找不到與 '{original or eng_query}' 相關的內容。"
-
+        return []
     dense_results = [{"id": i, "text": d, "metadata": m, "score": max(0.0, 1.0 - dist)}
                      for i, d, m, dist in zip(ids0, docs0, metas0, dists0)]
-
     retriever = HybridRetriever(cross_encoder_name=RUNTIME.rerank_model or None)
     retriever.index([{"id": r["id"], "text": r["text"], "metadata": r["metadata"]}
                      for r in dense_results])
-    out = retriever.search(eng_query, expanded_terms=expanded,
-                           dense_results=dense_results, top_k=n_results)
-    hits = out.get("results", [])
+    return retriever.search(eng_query, expanded_terms=expanded,
+                            dense_results=dense_results, top_k=n_results).get("results", [])
+
+
+def _retrieve_en(query_en: str, file_name: Optional[str], n_results: int = 8) -> str:
+    """已是英文的查詢：直接檢索，跳過翻譯（給確定性管線用，省掉大量 LLM 呼叫）。"""
+    where = {"file_name": file_name} if file_name else None
+    return _retrieve_and_format(query_en, [], where, file_name, n_results, original=query_en)
+
+
+def _retrieve_and_format(eng_query: str, expanded: List[str],
+                         where_filter: Optional[dict], file_name: Optional[str],
+                         n_results: int, original: str = "") -> str:
+    """檢索並組成可讀片段。"""
+    hits = _retrieve_hits(eng_query, expanded, where_filter, n_results)
     if not hits:
         return f"⚠️ 知識庫中找不到與 '{original or eng_query}' 相關的內容。"
-
     blocks = []
     for r in hits:
         m = r.get("metadata", {})
@@ -1026,37 +1027,39 @@ def _gather_files_deterministic(user_prompt: str, file_registry: dict,
     print(f"  🔎 [Retrieve] 每檔 {len(_STD_METRIC_QUERIES)} 項指標，{RUNTIME.gather_workers} 路並行…")
 
     def _search_one_file(fn: str):
-        rows = []
+        """對單一檔案跑所有指標查詢，依 chunk id 去重，保留『完整片段』（不硬切）。"""
+        seen = {}  # chunk_id -> 完整片段文字（保持首次出現＝最相關的順序）
         for label, q in _STD_METRIC_QUERIES:
             try:
-                # 直接英文檢索（跳過翻譯），只取前 4 段、每段精簡，控制證據總量
-                r = _retrieve_en(q, fn, n_results=4)
-            except Exception as e:  # noqa: BLE001
-                r = f"⚠️ 檢索失敗: {e}"
-            rows.append((fn, label, q, r))
-        return rows
+                hits = _retrieve_hits(q, [], {"file_name": fn}, n_results=3)
+            except Exception:  # noqa: BLE001
+                hits = []
+            for h in hits:
+                cid = h.get("id")
+                if cid and cid not in seen:
+                    seen[cid] = h.get("text", "")
+            _trace(resp, "tool_call", step=2, tool="search_knowledge_base",
+                   args={"file_name": fn, "search_query": q},
+                   result_preview=_preview(str([h.get("id") for h in hits])))
+        return fn, seen
 
     workers = max(1, min(len(files), RUNTIME.gather_workers))
-    by_file = {}
+    seen_by_file = {}
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        for rows in ex.map(_search_one_file, files):
-            if rows:
-                by_file[rows[0][0]] = rows
+        for fn, seen in ex.map(_search_one_file, files):
+            seen_by_file[fn] = seen
 
-    # 每檔給「均衡」的證據預算，確保每個檔案（每個年度）都進得了總結，不會被截斷吃掉
-    # 乘 0.85 留邊（分隔符與抽數注入），總量穩在 max_evidence_chars 內
+    # 每檔均衡預算；只「整段取捨」（去重後的完整片段），不從中間硬切，避免切斷數字
     per_file_budget = max(1500, int(RUNTIME.max_evidence_chars * 0.85 / max(1, len(files))))
     evidence: List[str] = []
     for fn in files:  # 穩定輸出順序
         used = 0
-        for (f, label, q, r) in by_file.get(fn, []):
-            snippet = _preview(r, 600)
-            if used + len(snippet) > per_file_budget:
-                continue
-            used += len(snippet)
-            evidence.append(f"【{f}｜{label}】\n{snippet}")
-            _trace(resp, "tool_call", step=2, tool="search_knowledge_base",
-                   args={"file_name": f, "search_query": q}, result_preview=_preview(r))
+        for cid, text in seen_by_file.get(fn, {}).items():  # 依相關性順序
+            block = f"【{fn}｜{cid}】\n{text}"
+            if used and used + len(block) > per_file_budget:
+                break  # 預算用完就停；但第一段（最相關，含彙總表）一定保留完整
+            used += len(block)
+            evidence.append(block)
 
     _trace(resp, "gather_done", evidence_count=len(evidence), mode="deterministic")
     return evidence

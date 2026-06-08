@@ -573,10 +573,10 @@ def _hybrid_search(search_query: str, file_name: Optional[str],
                                 n_results, original=search_query)
 
 
-# ── 生產級 RAG（rag.py）的注入依賴 ──
-def _dense_search(query: str, n: int, where_filter: Optional[dict] = None) -> List[dict]:
-    """單純 Chroma 向量檢索，回傳 hit 清單（給 rag.rag_search 當 dense 來源）。"""
-    raw = collection.query(query_texts=[query], n_results=n, where=where_filter,
+# ── Chroma 查詢 / 片段格式化（共用，避免多處重複）──
+def _chroma_query(query_text: str, n: int, where_filter: Optional[dict]) -> List[dict]:
+    """單一 Chroma 向量檢索並解包成 hit 清單 [{id,text,metadata,score}]。"""
+    raw = collection.query(query_texts=[query_text], n_results=n, where=where_filter,
                            include=["documents", "metadatas", "distances"])
     ids = (raw.get("ids") or [[]])[0]
     docs = (raw.get("documents") or [[]])[0]
@@ -584,6 +584,22 @@ def _dense_search(query: str, n: int, where_filter: Optional[dict] = None) -> Li
     dists = (raw.get("distances") or [[]])[0]
     return [{"id": i, "text": d, "metadata": m, "score": max(0.0, 1.0 - dist)}
             for i, d, m, dist in zip(ids, docs, metas, dists)]
+
+
+def _format_hit_blocks(hits: List[dict]) -> str:
+    """把 hit 清單組成可讀片段「【來源: 檔 | 區塊 #n】\\n內文」（多處共用的單一格式器）。"""
+    blocks = []
+    for r in hits:
+        m = r.get("metadata", {})
+        blocks.append(f"【來源: {m.get('source_file', m.get('file_name', '未知'))} | "
+                      f"區塊 #{m.get('chunk_index', '?')}】\n{r['text']}")
+    return "\n\n---\n\n".join(blocks)
+
+
+# ── 生產級 RAG（rag.py）的注入依賴 ──
+def _dense_search(query: str, n: int, where_filter: Optional[dict] = None) -> List[dict]:
+    """單純 Chroma 向量檢索，回傳 hit 清單（給 rag.rag_search 當 dense 來源）。"""
+    return _chroma_query(query, n, where_filter)
 
 
 _CROSS_ENCODER = None  # 惰性快取的 cross-encoder（bge-reranker-large）
@@ -618,15 +634,10 @@ def _rag_v2_search(search_query: str, file_name: Optional[str],
     hits = result.get("hits", [])
     if not hits:
         return f"⚠️ 知識庫中找不到與 '{search_query}' 相關的內容。"
-    blocks = []
-    for r in hits:
-        m = r.get("metadata", {})
-        blocks.append(f"【來源: {m.get('source_file', m.get('file_name', '未知'))} | "
-                      f"區塊 #{m.get('chunk_index', '?')}】\n{r['text']}")
-    print(f"🔎 [RAG v2] '{search_query}' | {file_name or '全域'} | {len(blocks)} 片段"
+    print(f"🔎 [RAG v2] '{search_query}' | {file_name or '全域'} | {len(hits)} 片段"
           f"{'｜rerank' if RUNTIME.rerank_model else ''}")
-    return (f"🔍 RAG 檢索成功，找到 {len(blocks)} 個片段：\n\n"
-            + "\n\n---\n\n".join(blocks) + "\n\n請只根據以上原文回答，禁止捏造。")
+    return (f"🔍 RAG 檢索成功，找到 {len(hits)} 個片段：\n\n"
+            + _format_hit_blocks(hits) + "\n\n請只根據以上原文回答，禁止捏造。")
 
 
 def _retrieve_hits(eng_query: str, expanded: List[str],
@@ -634,18 +645,9 @@ def _retrieve_hits(eng_query: str, expanded: List[str],
     """dense(Chroma) + BM25 + RRF（+可選 rerank），回傳結構化 hits（不格式化、不翻譯）。"""
     from retrieval import HybridRetriever
     effective = (eng_query + " " + " ".join(expanded)).strip()
-    raw = collection.query(
-        query_texts=[effective], n_results=max(n_results, 20),
-        where=where_filter, include=["documents", "metadatas", "distances"],
-    )
-    ids0 = (raw.get("ids") or [[]])[0]
-    docs0 = (raw.get("documents") or [[]])[0]
-    metas0 = (raw.get("metadatas") or [[]])[0]
-    dists0 = (raw.get("distances") or [[]])[0]
-    if not docs0:
+    dense_results = _chroma_query(effective, max(n_results, 20), where_filter)
+    if not dense_results:
         return []
-    dense_results = [{"id": i, "text": d, "metadata": m, "score": max(0.0, 1.0 - dist)}
-                     for i, d, m, dist in zip(ids0, docs0, metas0, dists0)]
     # 這裡「不」啟用 per-call cross-encoder：本函式會被確定性管線呼叫很多次，
     # 每次新建 HybridRetriever 會重載 reranker 模型（極慢）。rerank 統一在
     # FA_RAG_V2 路徑用模組級快取的 _cross_encode 做。
@@ -669,15 +671,9 @@ def _retrieve_and_format(eng_query: str, expanded: List[str],
     hits = _retrieve_hits(eng_query, expanded, where_filter, n_results)
     if not hits:
         return f"⚠️ 知識庫中找不到與 '{original or eng_query}' 相關的內容。"
-    blocks = []
-    for r in hits:
-        m = r.get("metadata", {})
-        blocks.append(f"【來源: {m.get('source_file', m.get('file_name', '未知'))} | "
-                      f"區塊 #{m.get('chunk_index', '?')}】\n{r['text']}")
-    context = "\n\n---\n\n".join(blocks)
-    print(f"🔍 [Hybrid] '{original or eng_query}' | {file_name or '全域'} | {len(blocks)} 片段")
-    return (f"🔍 檢索成功（{eng_query}），找到 {len(blocks)} 個片段：\n\n"
-            f"{context}\n\n請只根據以上原文回答，禁止捏造。")
+    print(f"🔍 [Hybrid] '{original or eng_query}' | {file_name or '全域'} | {len(hits)} 片段")
+    return (f"🔍 檢索成功（{eng_query}），找到 {len(hits)} 個片段：\n\n"
+            + _format_hit_blocks(hits) + "\n\n請只根據以上原文回答，禁止捏造。")
 
 
 def get_database_schema(args: dict, file_registry: dict) -> str:

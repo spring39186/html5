@@ -1057,7 +1057,10 @@ def _gather_evidence(plan: PlanningResult, user_prompt: str,
 
             messages.append({
                 "role": "tool", "tool_call_id": tc.id,
-                "name": func_name, "content": result_str,
+                "name": func_name,
+                # 回灌給執行器的內容截短：它只需知道「這次查到了」就能決定下一步；
+                # 完整結果已另存進 evidence 供總結使用。避免 messages 累積爆量拖慢每一步。
+                "content": _preview(result_str, 1200),
             })
 
     _trace(resp, "gather_done", evidence_count=len(evidence))

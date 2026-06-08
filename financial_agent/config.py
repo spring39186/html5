@@ -73,6 +73,10 @@ class RuntimeConfig:
     struct_chunk: bool = _bool_env("FA_STRUCT_CHUNK")          # chunking.py（結構化分塊）
     use_graph: bool = _bool_env("FA_USE_GRAPH")                # graph.py（LangGraph 編排）
     rerank_model: str = os.getenv("FA_RERANK_MODEL", "")  # 設 cross-encoder 名稱才啟用 rerank（如 BAAI/bge-reranker-base）
+    # 確定性解析管線：file_analysis/multi_file 改用「解析所有檔→標準指標檢索（檔案層級多工）」，
+    # 不再讓執行器逐步 LLM 決策，更快更穩。預設關閉。
+    deterministic_gather: bool = _bool_env("FA_DETERMINISTIC_GATHER")
+    gather_workers: int = int(os.getenv("FA_GATHER_WORKERS", "3"))  # 解析管線檢索階段的並行數
 
 
 MODEL_CONFIG = ModelConfig()

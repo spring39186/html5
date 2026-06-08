@@ -118,8 +118,8 @@ def _visualize(state: AgentState) -> dict:
 
 def _gather(state: AgentState) -> dict:
     resp = state["_resp"]
-    evidence = agent._gather_evidence(state["_plan"], state["user_query"],
-                                      state.get("file_registry") or {}, resp)
+    evidence = agent.gather(state["_plan"], state["user_query"],
+                            state.get("file_registry") or {}, resp)
     return {"_resp": resp, "evidence": evidence}
 
 

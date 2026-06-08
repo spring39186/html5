@@ -973,6 +973,82 @@ SYNTHESIS_SYSTEM_PROMPT = """你是首席財務分析師（總結整合 agent）
 - 不需要圖表時，charts 給空陣列 []；不需要表格時，tables 給空陣列 []。"""
 
 
+# 確定性解析管線要撈的標準財務指標（英文查詢；KB 已英文）
+_STD_METRIC_QUERIES = [
+    ("營收 Revenue", "revenue net sales current fiscal year"),
+    ("營業利益 Operating income", "operating income operating profit current fiscal year"),
+    ("淨利 Net income", "profit attributable to owners of the parent net income current fiscal year"),
+    ("EPS", "basic earnings per share current fiscal year"),
+    ("毛利 Gross profit", "gross profit current fiscal year"),
+    ("資本支出 CAPEX", "capital expenditure CAPEX current fiscal year"),
+    ("資產/權益 Assets & Equity", "total assets total equity current fiscal year"),
+]
+
+
+def _gather_files_deterministic(user_prompt: str, file_registry: dict,
+                                resp: AgentResponse) -> List[str]:
+    """
+    確定性解析管線（取代 LLM 逐步決策）：
+      1) 解析所有上傳檔（OCR 內部已並行）
+      2) 對每檔 × 標準財務指標做檢索（檔案層級多工）
+    回傳證據清單，交給抽數 + 總結 agent。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    files = list(file_registry.keys())
+
+    # 1) 解析所有檔案（序列；單一 Ollama 下多檔並行助益有限，OCR 頁層級已並行）
+    print(f"\n  📂 [Parse] 解析 {len(files)} 個檔案…")
+    for fn in files:
+        try:
+            res = parse_financial_pdf({"file_name": fn}, file_registry)
+        except Exception as e:  # noqa: BLE001
+            res = f"⚠️ 解析失敗: {e}"
+        resp.thought_logs.append({"tool": "parse_financial_pdf", "step": 1,
+                                  "thought": f"解析 {fn}"})
+        _trace(resp, "tool_call", step=1, tool="parse_financial_pdf",
+               args={"file_name": fn}, result_preview=_preview(str(res)))
+
+    # 2) 每檔的標準指標檢索（檔案層級多工）
+    print(f"  🔎 [Retrieve] 每檔 {len(_STD_METRIC_QUERIES)} 項指標，{RUNTIME.gather_workers} 路並行…")
+
+    def _search_one_file(fn: str):
+        rows = []
+        for label, q in _STD_METRIC_QUERIES:
+            try:
+                r = str(search_knowledge_base({"search_query": q, "file_name": fn}, file_registry))
+            except Exception as e:  # noqa: BLE001
+                r = f"⚠️ 檢索失敗: {e}"
+            rows.append((fn, label, q, r))
+        return rows
+
+    workers = max(1, min(len(files), RUNTIME.gather_workers))
+    by_file = {}
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for rows in ex.map(_search_one_file, files):
+            if rows:
+                by_file[rows[0][0]] = rows
+
+    evidence: List[str] = []
+    for fn in files:  # 穩定輸出順序
+        for (f, label, q, r) in by_file.get(fn, []):
+            evidence.append(f"【{f}｜{label}】\n{_preview(r, 2500)}")
+            _trace(resp, "tool_call", step=2, tool="search_knowledge_base",
+                   args={"file_name": f, "search_query": q}, result_preview=_preview(r))
+
+    _trace(resp, "gather_done", evidence_count=len(evidence), mode="deterministic")
+    return evidence
+
+
+def gather(plan: PlanningResult, user_prompt: str,
+           file_registry: dict, resp: AgentResponse) -> List[str]:
+    """收集階段分派：檔案分析任務 + 開啟旗標時走確定性多工管線，否則走 LLM 工具迴圈。
+    （工具流程與 LangGraph 兩入口共用此分派。）"""
+    if (RUNTIME.deterministic_gather and file_registry
+            and plan.intent in (IntentType.FILE_ANALYSIS, IntentType.MULTI_FILE_COMPARE)):
+        return _gather_files_deterministic(user_prompt, file_registry, resp)
+    return _gather_evidence(plan, user_prompt, file_registry, resp)
+
+
 def _gather_evidence(plan: PlanningResult, user_prompt: str,
                      file_registry: dict, resp: AgentResponse) -> List[str]:
     """收集階段：跑工具迴圈撈證據，回傳證據字串清單。"""
@@ -1290,7 +1366,7 @@ def _present_synthesis(synthesis: dict, resp: AgentResponse,
 def _execute_tool_loop(plan: PlanningResult, user_prompt: str,
                        file_registry: dict, resp: AgentResponse) -> None:
     """統籌三階段：收集 → 整合 → 視覺化/表格 → 一起呈現。"""
-    evidence = _gather_evidence(plan, user_prompt, file_registry, resp)
+    evidence = gather(plan, user_prompt, file_registry, resp)
     print("\n  🧩 [Synthesize] 總結 agent 整合證據...")
     want_viz = _wants_visualization(user_prompt, plan)
     synthesis = _synthesize(user_prompt, plan, evidence, resp, want_viz)

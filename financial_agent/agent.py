@@ -924,8 +924,9 @@ SYNTHESIS_SYSTEM_PROMPT = """你是首席財務分析師（總結整合 agent）
 - 只能使用證據中實際出現的數據，嚴禁捏造、臆測或自行假設數字。
 - 若證據不足以回答某部分，在報告中誠實說明「資料不足」，不要硬湊。
 - 圖表/表格的 data 必須是從證據抽出的真實數值。
-- 【不可漏年度】使用者若要各年度指標，務必把證據中出現的「每一個年度」都列出，逐年比對，
-  不可只挑其中幾年。動手前先在心中盤點證據裡出現過哪些年度，確保全部涵蓋。
+- 【年度對齊】若使用者需求附有【目標年度】，「一律以目標年度為準」：逐年涵蓋每一個目標年度
+  （尤其最新年度不可漏），且「不要」把財報中的去年比較數當成獨立年度納入。
+  若沒有指定目標年度，才改為列出證據中實際出現的每一個年度。動手前先盤點要呈現哪些年度。
 - 【單位一致】不同來源可能用不同單位（億日圓 / 百萬日圓 / 兆日圓；億元 等）。
   比較或畫圖前，務必先「換算成同一單位」，並在報告中標明所用單位；
   例：2,766,557 百萬日圓 = 約 2.77 兆日圓 = 27,665 億日圓。換算錯誤等同捏造，請特別小心。
@@ -1046,9 +1047,18 @@ def _wants_visualization(user_prompt: str, plan: PlanningResult) -> bool:
     return any(k in user_prompt or k in low for k in _VIZ_KEYWORDS)
 
 
+def _target_years_from_files(file_registry: dict) -> List[str]:
+    """從上傳檔名抽出目標年度（如 迅銷2023/2024/2025 → ['2023','2024','2025']）。"""
+    years = set()
+    for name in (file_registry or {}):
+        for y in re.findall(r"(?<!\d)(20\d{2})(?!\d)", name):
+            years.add(y)
+    return sorted(years)
+
+
 def _synthesize(user_prompt: str, plan: PlanningResult,
                 evidence: List[str], resp: AgentResponse,
-                want_viz: bool = True) -> dict:
+                want_viz: bool = True, file_registry: dict = None) -> dict:
     """整合階段：總結 agent 把證據整合成報告 + 圖表/表格指定（JSON）。"""
     if evidence:
         evidence_text = "\n\n========\n\n".join(evidence)
@@ -1062,7 +1072,20 @@ def _synthesize(user_prompt: str, plan: PlanningResult,
     viz_rule = ("使用者本次「有要求」視覺化，charts 可填入需要的圖表規格。"
                 if want_viz else
                 "使用者本次「沒有要求」視覺化，charts 一律給空陣列 []，只輸出文字報告（必要時可用表格）。")
-    user_block = (f"【使用者需求】\n{user_prompt}\n\n"
+
+    # 目標年度錨定：以上傳檔名年度為準，避免總結者誤抓「比較年度」或漏掉最新年度
+    target_years = _target_years_from_files(file_registry)
+    if target_years:
+        year_rule = (
+            f"\n【目標年度（務必遵守）】使用者上傳的是 {', '.join(target_years)} 年的報告，"
+            f"分析「必須」以這幾個年度為主軸：每一年都要涵蓋（特別是最新的 {target_years[-1]} 年，"
+            f"它通常在最新那份檔案裡）。\n"
+            f"財報常同時列出『本期 + 去年比較數』，請只取『本期』數字對應到該報告年度，"
+            f"不要把更早的比較年度（如 {int(target_years[0]) - 1} 年）當成獨立分析年度納入。\n")
+    else:
+        year_rule = ""
+
+    user_block = (f"【使用者需求】\n{user_prompt}\n{year_rule}\n"
                   f"【視覺化規則】{viz_rule}\n\n"
                   f"【收集到的證據】\n{evidence_text}\n\n"
                   "請整合以上證據，輸出 JSON（report / charts / tables）。")
@@ -1188,7 +1211,7 @@ def _execute_tool_loop(plan: PlanningResult, user_prompt: str,
     evidence = _gather_evidence(plan, user_prompt, file_registry, resp)
     print("\n  🧩 [Synthesize] 總結 agent 整合證據...")
     want_viz = _wants_visualization(user_prompt, plan)
-    synthesis = _synthesize(user_prompt, plan, evidence, resp, want_viz)
+    synthesis = _synthesize(user_prompt, plan, evidence, resp, want_viz, file_registry)
     _present_synthesis(synthesis, resp, file_registry, want_viz)
 
 

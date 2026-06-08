@@ -1080,6 +1080,62 @@ def _wants_visualization(user_prompt: str, plan: PlanningResult) -> bool:
     return any(k in user_prompt or k in low for k in _VIZ_KEYWORDS)
 
 
+# 量化任務關鍵字：要統計各年數字才需要「程式化抽數」這一步
+_METRIC_KEYWORDS = ("統計", "各年", "逐年", "歷年", "趨勢", "比較", "年度", "指標", "成長",
+                    "營收", "毛利", "淨利", "eps", "每股", "資本支出", "revenue", "margin")
+
+
+def _needs_metric_extraction(user_prompt: str, plan: PlanningResult, want_viz: bool) -> bool:
+    """是否需要先做『各年度×指標』結構化抽取（只在量化的檔案分析任務才需要）。"""
+    if plan.intent not in (IntentType.FILE_ANALYSIS, IntentType.MULTI_FILE_COMPARE):
+        return False
+    low = (user_prompt or "").lower()
+    return want_viz or any(k in user_prompt or k in low for k in _METRIC_KEYWORDS)
+
+
+_METRIC_EXTRACT_SYSTEM = """你是嚴謹的財務數據抽取器。從證據中抽出使用者需要的「各年度 × 指標」數值。
+
+【鐵則】
+- 每份報告以『本期年度(current fiscal year)』為準：判讀線索如「year ended August 31, 2025」、
+  「FYE Aug 2025」、「Current Consolidated Fiscal Year (… to August 31, 2025)」、「当期/通期…2025年8月期」。
+  以該欄為該檔的年度數字；「去年比較欄(Prior/前期)」只用來補洞，絕不可當成獨立年度。
+- 涵蓋證據中出現的所有『本期年度』，特別是「最新年度」一定要有，一年都不能漏。
+- 數值「原樣保留」（例如以百萬日圓表示就照抄 3,400,539），不要換算、不要四捨五入、不要捏造；
+  某年某指標查無就填 null。
+- 只輸出 JSON，不要任何說明：
+  {
+    "years": ["2023","2024","2025"],
+    "metrics": {
+      "營收": {"2023": 2766557, "2024": 3103836, "2025": 3400539},
+      "營業利益": {...}, "淨利": {...}, "EPS": {...}
+    },
+    "unit": "百萬日圓"
+  }"""
+
+
+def _extract_metrics(user_prompt: str, evidence_text: str, resp: AgentResponse) -> Optional[dict]:
+    """量化任務專用：把證據抽成乾淨的『年度×指標』JSON（與敘述分離，降低弱模型漏年度/抄錯欄）。"""
+    print("  🔢 [Extract] 抽取各年度×指標結構化數據…")
+    t0 = time.perf_counter()
+    try:
+        raw = _chat(
+            MODEL_CONFIG.synthesizer,
+            [{"role": "system", "content": _METRIC_EXTRACT_SYSTEM},
+             {"role": "user", "content": f"【使用者需求】\n{user_prompt}\n\n"
+                                         f"【證據】\n{evidence_text}\n\n只輸出 JSON。"}],
+            temperature=0.0,
+        )
+        data = _extract_json(raw)
+        _trace(resp, "metric_extraction", years=data.get("years"),
+               metric_count=len(data.get("metrics", {})),
+               duration_ms=round((time.perf_counter() - t0) * 1000, 1))
+        return data
+    except Exception as e:  # noqa: BLE001
+        print(f"  ⚠️ 抽數失敗，改由總結者直接讀證據: {e}")
+        _trace(resp, "metric_extraction_failed", error=str(e))
+        return None
+
+
 def _synthesize(user_prompt: str, plan: PlanningResult,
                 evidence: List[str], resp: AgentResponse,
                 want_viz: bool = True) -> dict:
@@ -1093,14 +1149,28 @@ def _synthesize(user_prompt: str, plan: PlanningResult,
     if len(evidence_text) > RUNTIME.max_evidence_chars:
         evidence_text = evidence_text[:RUNTIME.max_evidence_chars] + "\n…（證據過長已截斷）"
 
+    # 量化任務：先做程式化抽數，得到權威的「年度×指標」表（非量化問題則跳過）
+    extracted = None
+    if evidence and _needs_metric_extraction(user_prompt, plan, want_viz):
+        extracted = _extract_metrics(user_prompt, evidence_text, resp)
+
     viz_rule = ("使用者本次「有要求」視覺化，charts 可填入需要的圖表規格。"
                 if want_viz else
                 "使用者本次「沒有要求」視覺化，charts 一律給空陣列 []，只輸出文字報告（必要時可用表格）。")
 
+    extracted_block = ""
+    if extracted:
+        extracted_block = (
+            "\n【已抽取的權威數據（最重要）】下面是從證據精準抽出的『年度×指標』表，"
+            "報告的逐年數字、所有圖表與表格的 data「一律以此為準」，"
+            "涵蓋的年度就是這裡的 years，不可多列或漏列年度：\n"
+            f"{json.dumps(extracted, ensure_ascii=False)}\n")
+
     user_block = (f"【使用者需求】\n{user_prompt}\n\n"
-                  f"【視覺化規則】{viz_rule}\n\n"
-                  f"【收集到的證據】\n{evidence_text}\n\n"
-                  "請整合以上證據，輸出 JSON（report / charts / tables）。")
+                  f"【視覺化規則】{viz_rule}\n"
+                  f"{extracted_block}\n"
+                  f"【收集到的證據（原文，供補充敘述與佐證）】\n{evidence_text}\n\n"
+                  "請整合以上資訊，輸出 JSON（report / charts / tables）。")
 
     t0 = time.perf_counter()
     used_model = MODEL_CONFIG.synthesizer

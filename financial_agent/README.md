@@ -110,14 +110,59 @@ python mcp_server_mssql.py        # stdio 啟動
 
 | 變數 | 預設 | 說明 |
 |------|------|------|
+| `FA_MODEL` | `（空）` | **一鍵把 planner/executor/synthesizer/coder/chat 全設成同一顆模型**，徹底消除換模型載入抖動（強烈建議在單 GPU 機器上設定，例如 `qwen3.6:27b`）。vision 仍用 glm-ocr |
 | `FA_REQUEST_TIMEOUT` | `240` | 單次 LLM 請求逾時（秒）。超過就放棄並走降級，不會卡死整個 app |
 | `FA_MAX_EVIDENCE_CHARS` | `12000` | 餵給總結 agent 的證據總長度上限，避免輸入過大導致超慢 |
-| `FA_NORMALIZE_LANG` | `（空）` | 設 `en` 時，OCR 後把每頁統一翻成英文再入庫（跨多國語言文件用）|
+| `FA_NORMALIZE_LANG` | `en` | OCR 後把每頁統一翻成英文再入庫（跨多國語言文件，減少漏資料）。設 `""` 可關閉 |
 | `FA_SYNTHESIZER` | `gemma4:31b` | 總結 agent 模型。**避免用超大模型（如 120B）**，反覆載入會逾時 |
 
 > **避免 model-swap 抖動**：同一任務若用到多顆差異很大的模型（35B/27B/120B），
 > Ollama 會反覆載入/卸載，造成單步暴慢甚至逾時。建議讓各角色模型盡量集中、
 > 並在 Ollama 設定 `keep_alive` 讓常用模型常駐。
+
+## Production Refactor（混合檢索 / 並發OCR / 結構化分塊 / 互動圖表）
+
+新增的生產級模組，**全部以功能旗標控制、預設關閉**，不影響現有行為。逐項開啟驗證即可。
+
+| 旗標（環境變數） | 預設 | 啟用的模組 | 解決什麼 |
+|---|---|---|---|
+| `FA_HYBRID_RETRIEVAL=1` | off | `retrieval.py` + `query_processing.py` | 查詢翻英+同義擴展+實體 → dense(Chroma)+BM25+RRF（+可選 rerank）。**修「漏年度/抓錯指標」** |
+| `FA_CONCURRENT_OCR=1` | off | `ocr_pipeline.py` | 逐頁 OCR→翻譯並發（ThreadPool）、content-hash 快取。**加速 OCR** |
+| `FA_STRUCT_CHUNK=1` | off | `chunking.py` | 結構化分塊：表格不跨塊、附頁碼/公司/年/季 metadata |
+| `FA_PLOTLY=1` | off | `viz_plotly.py` | 互動式 Plotly 圖（取代 matplotlib 靜態圖） |
+| `FA_RERANK_MODEL=BAAI/bge-reranker-base` | "" | cross-encoder | RRF 後再做精排（需 sentence-transformers） |
+| `FA_RETRIEVAL_DEBUG=1` | off | `retrieval_debug.py` | 檢索可觀測性（vector/bm25/rrf/rerank 軌跡） |
+| `FA_USE_GRAPH=1` | off | `graph.py` | LangGraph 編排（維護性，實驗中） |
+
+### 模組（新增，皆有離線單元測試於 `tests/`）
+
+`retrieval.py`(Phase3)、`query_processing.py`(Phase4/5)、`chunking.py`(Phase2)、
+`ocr_pipeline.py`(Phase1)、`viz_plotly.py`(Phase9)、`benchmark.py`(Phase10)、
+`retrieval_debug.py`(Phase7)。重依賴（rank_bm25/tiktoken/sentence-transformers/plotly/langgraph）
+全部惰性載入並有 fallback；缺套件不會讓系統壞掉。
+
+### 啟用步驟（Migration）
+
+```bash
+pip install -r requirements.txt          # 安裝選用相依
+# 建議一次只開一個旗標、用同一組問題對照前後品質：
+set FA_HYBRID_RETRIEVAL=1                 # 先驗證檢索（最高優先、修最痛的 bug）
+set FA_PLOTLY=1                           # 再驗證互動圖
+set FA_CONCURRENT_OCR=1                   # 再驗證 OCR 加速（注意首次會重新解析）
+set FA_STRUCT_CHUNK=1                     # 結構化分塊（建議與 hybrid 一起）
+streamlit run app.py
+```
+
+### 回滾（Rollback）
+
+任何旗標出問題 → 拿掉該環境變數即可立刻回到原行為（程式碼分支預設走舊路徑）。
+完全回退 → `git revert` 整合 commit；Wave1/2 的純模組為新增檔，不影響執行。
+
+### 跑測試
+
+```bash
+cd financial_agent && for t in tests/test_*.py; do python3 "$t"; done
+```
 
 ## 後續可加強
 

@@ -119,6 +119,7 @@ class AgentResponse:
     planning_result: Optional[dict] = None
     route: str = ""
     executed_sql: List[str] = field(default_factory=list)  # 本輪實際執行的 SQL（供對話記憶）
+    plotly_jsons: List[str] = field(default_factory=list)  # 互動式 Plotly 圖（FA_PLOTLY 開啟時）
     trace: List[dict] = field(default_factory=list)  # 完整執行軌跡（供下載/優化）
 
 
@@ -346,9 +347,7 @@ def _cache_path(pdf_path: str) -> str:
 
 def _normalize_to_english(full_text: str) -> str:
     """把多語言 OCR 內容逐頁翻成英文（保留表格/數字/結構），統一語言以利檢索與整合。"""
-    sys = ("You are a professional financial translator. Translate the following report page "
-           "into English. Keep ALL numbers, dates and markdown tables EXACTLY as-is; only "
-           "translate surrounding text and labels. Output only the translation, no commentary.")
+    from ocr_pipeline import TRANSLATION_SYSTEM_PROMPT  # 共用同一份翻譯指令，避免兩路徑不一致
     out = []
     for sec in full_text.split("\n\n---\n\n"):
         if len(sec.strip()) < 20:
@@ -356,7 +355,7 @@ def _normalize_to_english(full_text: str) -> str:
             continue
         try:
             out.append(_chat(MODEL_CONFIG.coder,
-                             [{"role": "system", "content": sys},
+                             [{"role": "system", "content": TRANSLATION_SYSTEM_PROMPT},
                               {"role": "user", "content": sec}],
                              temperature=0.1))
         except Exception:  # noqa: BLE001
@@ -372,72 +371,114 @@ def parse_financial_pdf(args: dict, file_registry: dict) -> str:
         available = ", ".join(file_registry.keys()) if file_registry else "無"
         return f"❌ 找不到檔案 '{file_name}'。可用檔案: {available}"
 
-    cache_file = _cache_path(pdf_path)
-    if os.path.exists(cache_file):
-        print(f"🔄 [Cache Hit] {cache_file}")
-        with open(cache_file, "r", encoding="utf-8") as f:
-            full_text = f.read()
+    normalize = (RUNTIME.normalize_lang == "en")
+
+    if RUNTIME.concurrent_ocr:
+        # 並發 OCR + 逐頁翻譯（content-hash 快取由 ocr_pipeline 內部處理）
+        from ocr_pipeline import process_pdf, TRANSLATION_SYSTEM_PROMPT
+
+        def _ocr_call(p: int, img_bytes: bytes) -> str:
+            b64 = base64.b64encode(img_bytes).decode()
+            return _chat(MODEL_CONFIG.vision,
+                [{"role": "user", "content": [
+                    {"type": "text", "text": f"這是 PDF 第 {p + 1} 頁。請完整轉成 Markdown，"
+                                             f"保留所有表格、數字與文字，不可遺漏任何數據。"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                ]}], temperature=0.0, max_tokens=4096)
+
+        def _translate_call(p: int, md: str) -> str:
+            if not normalize or len(md.strip()) < 20:
+                return md
+            return _chat(MODEL_CONFIG.coder,
+                [{"role": "system", "content": TRANSLATION_SYSTEM_PROMPT},
+                 {"role": "user", "content": md}], temperature=0.1)
+
+        try:
+            full_text = process_pdf(pdf_path, _ocr_call, _translate_call,
+                                    normalize=normalize, cache_dir=RUNTIME.cache_dir)
+        except Exception as e:  # noqa: BLE001
+            return f"❌ OCR 解析失敗: {e}"
         total_pages = full_text.count("## 第") or 1
     else:
-        print(f"🔍 [Cache Miss] 全頁 OCR: {pdf_path}")
-        try:
-            doc = fitz.open(pdf_path)
-        except Exception as e:  # noqa: BLE001
-            return f"❌ 無法開啟 PDF: {e}"
-
-        total_pages = len(doc)  # 先存起來，避免 close 後再讀
-        pages_text = []
-        for page_num in range(total_pages):
-            print(f"  📄 解析第 {page_num + 1}/{total_pages} 頁...")
-            try:
-                page = doc.load_page(page_num)
-                pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5))
-                img_b64 = base64.b64encode(pix.tobytes("png")).decode()
-                content = _chat(
-                    MODEL_CONFIG.vision,
-                    [{"role": "user", "content": [
-                        {"type": "text", "text":
-                            f"這是 PDF 第 {page_num + 1} 頁。請完整轉成 Markdown，"
-                            f"保留所有表格、數字與文字，不可遺漏任何數據。"},
-                        {"type": "image_url",
-                         "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
-                    ]}],
-                    temperature=0.0,
-                    max_tokens=4096,
-                )
-            except Exception as e:  # noqa: BLE001
-                # 單頁失敗不拖垮整份，標記後繼續
-                content = f"_（第 {page_num + 1} 頁解析失敗：{e}）_"
-            pages_text.append(f"## 第 {page_num + 1} 頁\n\n{content}")
-
-        full_text = "\n\n---\n\n".join(pages_text)
-        doc.close()
-        with open(cache_file, "w", encoding="utf-8") as f:
-            f.write(full_text)
-
-    # 選用：統一翻成英文再入庫（跨多國語言文件，提升檢索與整合一致性）
-    if RUNTIME.normalize_lang == "en":
-        norm_cache = cache_file + ".en.md"
-        if os.path.exists(norm_cache):
-            print(f"🔄 [Norm Cache] {norm_cache}")
-            with open(norm_cache, "r", encoding="utf-8") as f:
+        cache_file = _cache_path(pdf_path)
+        if os.path.exists(cache_file):
+            print(f"🔄 [Cache Hit] {cache_file}")
+            with open(cache_file, "r", encoding="utf-8") as f:
                 full_text = f.read()
+            total_pages = full_text.count("## 第") or 1
         else:
-            print(f"🌐 [Normalize→EN] 正在統一語言: {file_name} ...")
-            full_text = _normalize_to_english(full_text)
-            with open(norm_cache, "w", encoding="utf-8") as f:
+            print(f"🔍 [Cache Miss] 全頁 OCR: {pdf_path}")
+            try:
+                doc = fitz.open(pdf_path)
+            except Exception as e:  # noqa: BLE001
+                return f"❌ 無法開啟 PDF: {e}"
+
+            total_pages = len(doc)
+            pages_text = []
+            for page_num in range(total_pages):
+                print(f"  📄 解析第 {page_num + 1}/{total_pages} 頁...")
+                try:
+                    page = doc.load_page(page_num)
+                    pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5))
+                    img_b64 = base64.b64encode(pix.tobytes("png")).decode()
+                    content = _chat(
+                        MODEL_CONFIG.vision,
+                        [{"role": "user", "content": [
+                            {"type": "text", "text":
+                                f"這是 PDF 第 {page_num + 1} 頁。請完整轉成 Markdown，"
+                                f"保留所有表格、數字與文字，不可遺漏任何數據。"},
+                            {"type": "image_url",
+                             "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+                        ]}],
+                        temperature=0.0,
+                        max_tokens=4096,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    content = f"_（第 {page_num + 1} 頁解析失敗：{e}）_"
+                pages_text.append(f"## 第 {page_num + 1} 頁\n\n{content}")
+
+            full_text = "\n\n---\n\n".join(pages_text)
+            doc.close()
+            with open(cache_file, "w", encoding="utf-8") as f:
                 f.write(full_text)
+
+        # 選用：統一翻成英文再入庫
+        if normalize:
+            norm_cache = cache_file + ".en.md"
+            if os.path.exists(norm_cache):
+                print(f"🔄 [Norm Cache] {norm_cache}")
+                with open(norm_cache, "r", encoding="utf-8") as f:
+                    full_text = f.read()
+            else:
+                print(f"🌐 [Normalize→EN] 正在統一語言: {file_name} ...")
+                full_text = _normalize_to_english(full_text)
+                with open(norm_cache, "w", encoding="utf-8") as f:
+                    f.write(full_text)
 
     # 切塊
     print(f"📚 [Vectorizing] {file_name} ...")
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200,
-        separators=["\n## ", "\n### ", "\n\n", "\n", " "],
-    )
-    chunks = splitter.split_text(full_text)
+    if RUNTIME.struct_chunk:
+        # 結構化分塊（表格不跨塊、附豐富 metadata）；chunk_markdown 內部會自行做
+        # infer_doc_metadata，這裡只需傳 file_name（供清理舊 chunk 的 where 查詢）
+        from chunking import chunk_markdown
+        chunk_objs = chunk_markdown(full_text, source_file=file_name,
+                                    base_metadata={"file_name": file_name})
+        chunk_ids = [c["id"] for c in chunk_objs]
+        chunk_docs = [c["text"] for c in chunk_objs]
+        chunk_metas = [c["metadata"] for c in chunk_objs]
+    else:
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200,
+            separators=["\n## ", "\n### ", "\n\n", "\n", " "],
+        )
+        chunks = splitter.split_text(full_text)
+        chunk_ids = [f"{file_name}_chunk_{i}" for i in range(len(chunks))]
+        chunk_docs = chunks
+        chunk_metas = [{"file_name": file_name, "chunk_index": i, "total_chunks": len(chunks)}
+                       for i in range(len(chunks))]
 
-    # 清掉同檔舊 chunk（用實際查詢，不再硬迴圈 range(500)）
+    # 清掉同檔舊 chunk
     try:
         existing = collection.get(where={"file_name": file_name})
         if existing and existing.get("ids"):
@@ -445,16 +486,9 @@ def parse_financial_pdf(args: dict, file_registry: dict) -> str:
     except Exception as e:  # noqa: BLE001
         print(f"  ⚠️ 清理舊 chunk 失敗（可忽略）: {e}")
 
-    collection.add(
-        ids=[f"{file_name}_chunk_{i}" for i in range(len(chunks))],
-        documents=chunks,
-        metadatas=[
-            {"file_name": file_name, "chunk_index": i, "total_chunks": len(chunks)}
-            for i in range(len(chunks))
-        ],
-    )
+    collection.add(ids=chunk_ids, documents=chunk_docs, metadatas=chunk_metas)
     return (f"✅ 檔案 {file_name} 已完成全頁解析！共 {total_pages} 頁，"
-            f"切割成 {len(chunks)} 個知識區塊。請呼叫 search_knowledge_base 檢索數據。")
+            f"切割成 {len(chunk_docs)} 個知識區塊。請呼叫 search_knowledge_base 檢索數據。")
 
 
 def search_knowledge_base(args: dict, file_registry: dict) -> str:
@@ -472,6 +506,13 @@ def search_knowledge_base(args: dict, file_registry: dict) -> str:
 
     if any(kw in search_query for kw in ("比較", "趨勢", "變化", "差異", "對比")):
         n_results = min(n_results + 10, 30)
+
+    # 混合檢索路徑（FA_HYBRID_RETRIEVAL=1）：查詢翻英+擴展 → dense(Chroma)+BM25+RRF
+    if RUNTIME.hybrid_retrieval:
+        try:
+            return _hybrid_search(search_query, file_name, where_filter, n_results)
+        except Exception as e:  # noqa: BLE001
+            print(f"⚠️ 混合檢索失敗，回退純向量檢索: {e}")
 
     print(f"🔍 [Vector Search] '{search_query}' | {file_name or '全域'} | Top-K={n_results}")
     try:
@@ -496,6 +537,55 @@ def search_knowledge_base(args: dict, file_registry: dict) -> str:
         return f"🔍 檢索成功，找到 {len(blocks)} 個片段：\n\n{context}\n\n請只根據以上原文回答，禁止捏造。"
     except Exception as e:  # noqa: BLE001
         return f"❌ 檢索失敗: {e}"
+
+
+def _hybrid_search(search_query: str, file_name: Optional[str],
+                   where_filter: Optional[dict], n_results: int) -> str:
+    """混合檢索：查詢翻英+擴展 → Chroma dense + BM25 → RRF（+可選 rerank）。"""
+    from query_processing import translate_and_expand_query
+    from retrieval import HybridRetriever
+
+    def _llm(messages, temperature=0.1):
+        return _chat(MODEL_CONFIG.coder, messages, temperature=temperature)
+
+    tx = translate_and_expand_query(search_query, _llm)
+    eng_query = tx.get("translated_query", search_query)
+    expanded = tx.get("expanded_terms", [])
+    effective = (eng_query + " " + " ".join(expanded)).strip()
+
+    # dense：取較多候選給 RRF 融合
+    raw = collection.query(
+        query_texts=[effective], n_results=max(n_results, 20),
+        where=where_filter, include=["documents", "metadatas", "distances"],
+    )
+    ids0 = (raw.get("ids") or [[]])[0]
+    docs0 = (raw.get("documents") or [[]])[0]
+    metas0 = (raw.get("metadatas") or [[]])[0]
+    dists0 = (raw.get("distances") or [[]])[0]
+    if not docs0:
+        return f"⚠️ 知識庫中找不到與 '{search_query}' 相關的內容。"
+
+    dense_results = [{"id": i, "text": d, "metadata": m, "score": max(0.0, 1.0 - dist)}
+                     for i, d, m, dist in zip(ids0, docs0, metas0, dists0)]
+
+    retriever = HybridRetriever(cross_encoder_name=RUNTIME.rerank_model or None)
+    retriever.index([{"id": r["id"], "text": r["text"], "metadata": r["metadata"]}
+                     for r in dense_results])
+    out = retriever.search(eng_query, expanded_terms=expanded,
+                           dense_results=dense_results, top_k=n_results)
+    hits = out.get("results", [])
+    if not hits:
+        return f"⚠️ 知識庫中找不到與 '{search_query}' 相關的內容。"
+
+    blocks = []
+    for r in hits:
+        m = r.get("metadata", {})
+        blocks.append(f"【來源: {m.get('source_file', m.get('file_name', '未知'))} | "
+                      f"區塊 #{m.get('chunk_index', '?')}】\n{r['text']}")
+    context = "\n\n---\n\n".join(blocks)
+    print(f"🔍 [Hybrid] '{search_query}'→'{eng_query}' | {file_name or '全域'} | {len(blocks)} 片段")
+    return (f"🔍 混合檢索成功（查詢英譯：{eng_query}），找到 {len(blocks)} 個片段：\n\n"
+            f"{context}\n\n請只根據以上原文回答，禁止捏造。")
 
 
 def get_database_schema(args: dict, file_registry: dict) -> str:
@@ -816,13 +906,18 @@ SYNTHESIS_SYSTEM_PROMPT = """你是首席財務分析師（總結整合 agent）
 
 【你的任務】
 1. 整合所有證據，產出一份連貫、專業、結構清楚的繁體中文分析報告。
-2. 自行判斷哪些結果適合視覺化，並把要畫的圖「明確指定」出來（附上實際數據）。
+2. 依使用者提供的【視覺化規則】決定 charts：有要求才指定圖表（附實際數據），沒要求就給空陣列。
 3. 需要結構化表格時，也一併指定。
 
 【鐵則】
 - 只能使用證據中實際出現的數據，嚴禁捏造、臆測或自行假設數字。
 - 若證據不足以回答某部分，在報告中誠實說明「資料不足」，不要硬湊。
 - 圖表/表格的 data 必須是從證據抽出的真實數值。
+- 【不可漏年度】使用者若要各年度指標，務必把證據中出現的「每一個年度」都列出，逐年比對，
+  不可只挑其中幾年。動手前先在心中盤點證據裡出現過哪些年度，確保全部涵蓋。
+- 【單位一致】不同來源可能用不同單位（億日圓 / 百萬日圓 / 兆日圓；億元 等）。
+  比較或畫圖前，務必先「換算成同一單位」，並在報告中標明所用單位；
+  例：2,766,557 百萬日圓 = 約 2.77 兆日圓 = 27,665 億日圓。換算錯誤等同捏造，請特別小心。
 
 【輸出格式】只輸出有效 JSON：
 {
@@ -916,8 +1011,22 @@ def _gather_evidence(plan: PlanningResult, user_prompt: str,
     return evidence
 
 
+# 視覺化關鍵字：使用者有提到才畫圖
+_VIZ_KEYWORDS = ("圖", "趨勢", "視覺化", "畫", "繪", "長條", "折線", "圓餅", "柱狀",
+                 "chart", "plot", "graph", "bar", "line", "pie", "visuali", "trend")
+
+
+def _wants_visualization(user_prompt: str, plan: PlanningResult) -> bool:
+    """判斷使用者這次是否真的想要圖表（沒要求就不畫）。"""
+    if plan.intent == IntentType.VISUALIZATION:
+        return True
+    low = (user_prompt or "").lower()
+    return any(k in user_prompt or k in low for k in _VIZ_KEYWORDS)
+
+
 def _synthesize(user_prompt: str, plan: PlanningResult,
-                evidence: List[str], resp: AgentResponse) -> dict:
+                evidence: List[str], resp: AgentResponse,
+                want_viz: bool = True) -> dict:
     """整合階段：總結 agent 把證據整合成報告 + 圖表/表格指定（JSON）。"""
     if evidence:
         evidence_text = "\n\n========\n\n".join(evidence)
@@ -928,7 +1037,11 @@ def _synthesize(user_prompt: str, plan: PlanningResult,
     if len(evidence_text) > RUNTIME.max_evidence_chars:
         evidence_text = evidence_text[:RUNTIME.max_evidence_chars] + "\n…（證據過長已截斷）"
 
+    viz_rule = ("使用者本次「有要求」視覺化，charts 可填入需要的圖表規格。"
+                if want_viz else
+                "使用者本次「沒有要求」視覺化，charts 一律給空陣列 []，只輸出文字報告（必要時可用表格）。")
     user_block = (f"【使用者需求】\n{user_prompt}\n\n"
+                  f"【視覺化規則】{viz_rule}\n\n"
                   f"【收集到的證據】\n{evidence_text}\n\n"
                   "請整合以上證據，輸出 JSON（report / charts / tables）。")
 
@@ -972,39 +1085,61 @@ def _synthesize(user_prompt: str, plan: PlanningResult,
     return {"report": report, "charts": charts, "tables": tables}
 
 
-def _render_chart(spec: dict, resp: AgentResponse) -> None:
-    """視覺化階段：把總結者指定的單張圖交給 Coder 生成並執行。"""
-    title = spec.get("title", "圖表")
-    chart_type = spec.get("chart_type", "")
-    description = spec.get("description", "")
-    data = spec.get("data", [])
-    data_json = json.dumps(data, ensure_ascii=False)
+def _render_charts(charts: List[dict], resp: AgentResponse) -> None:
+    """
+    視覺化階段：把總結者指定的「所有」圖表，一次交給 Coder 畫在「同一張圖」上
+    （用 subplots 排版）。這樣圖會一起出現、可控 layout，也避免多張圖互相覆蓋同一檔案。
+    """
+    if not charts:
+        return
 
-    task = (f"請畫一張「{chart_type or '適當類型'}」圖：{title}。\n"
-            f"需求說明：{description}\n"
-            f"務必只用以下實際數據（不可更改、不可捏造、不可新增資料點）：\n{data_json}")
+    titles = "、".join(c.get("title", f"圖{i}") for i, c in enumerate(charts, 1))
 
-    print(f"  🎨 [Coder] 繪製: {title}")
+    # 互動式 Plotly 路徑（FA_PLOTLY=1）：產生 plotly 程式碼 → 沙箱執行 → 取 fig.to_json()
+    if RUNTIME.use_plotly:
+        from viz_plotly import generate_plotly
+        def _coder_call(messages, temperature=0.2):
+            return _chat(MODEL_CONFIG.coder, messages, temperature=temperature)
+        print(f"  📈 [Coder] 產生互動式 Plotly 圖 ({len(charts)}): {titles}")
+        result = generate_plotly(charts, coder_call=_coder_call,
+                                 run_script_fn=_run_script, max_repair=1)
+        resp.plotly_jsons.extend(result.get("plotly_jsons", []))
+        _trace(resp, "charts", chart_count=len(charts), titles=titles, engine="plotly",
+               code=_preview(result.get("code", ""), 2500),
+               output=_preview(result.get("stdout", "")))
+        return
+
+    # 預設：matplotlib 靜態圖（單一 figure、子圖排版）
+    n = len(charts)
+    lines = [
+        f"請用 matplotlib 在「單一張圖（一個 figure）」中，以子圖 subplots 排版呈現以下 {n} 個圖表。",
+        "排版要求：自動選擇適當網格（例如 2 欄；單張就 1 個圖），整體用 tight_layout 避免重疊，",
+        "每個子圖都要有自己的標題、座標軸標籤與數值標註；最後只存成一個檔案 output_plot.png。",
+        "鐵則：只能使用我提供的實際數據，不可更改、捏造或新增資料點。\n",
+    ]
+    for i, c in enumerate(charts, 1):
+        lines.append(
+            f"[子圖{i}] 標題：{c.get('title','')}｜類型：{c.get('chart_type','適當類型')}\n"
+            f"說明：{c.get('description','')}\n"
+            f"數據(JSON)：{json.dumps(c.get('data', []), ensure_ascii=False)}\n"
+        )
+    task = "\n".join(lines)
+
+    print(f"  🎨 [Coder] 一次繪製 {n} 張圖於同一版面: {titles}")
     result = run_python_code({"thought_process": task, "code": ""}, {})
-    _trace(resp, "chart", title=title, chart_type=chart_type,
-           code=_preview(result.get("code", ""), 2000),
+    _trace(resp, "charts", chart_count=n, titles=titles,
+           code=_preview(result.get("code", ""), 2500),
            output=_preview(result.get("output", "")))
     if result.get("plot"):
         resp.images.append(result["plot"])
 
 
-def _execute_tool_loop(plan: PlanningResult, user_prompt: str,
-                       file_registry: dict, resp: AgentResponse) -> None:
-    """統籌三階段：收集 → 整合 → 視覺化/表格 → 一起呈現。"""
-    # 1) 收集證據
-    evidence = _gather_evidence(plan, user_prompt, file_registry, resp)
+def _present_synthesis(synthesis: dict, resp: AgentResponse,
+                       file_registry: dict, want_viz: bool) -> None:
+    """呈現階段：把總結者指定的表格與圖表產出（供工具流程與 LangGraph 共用）。"""
+    resp.report_text = synthesis.get("report", resp.report_text)
 
-    # 2) 總結 agent 整合
-    print("\n  🧩 [Synthesize] 總結 agent 整合證據...")
-    synthesis = _synthesize(user_prompt, plan, evidence, resp)
-    resp.report_text = synthesis["report"]
-
-    # 3) 表格（由總結者指定）
+    # 表格（由總結者指定）
     for tbl in synthesis.get("tables", []):
         try:
             html = generate_financial_table(
@@ -1015,14 +1150,50 @@ def _execute_tool_loop(plan: PlanningResult, user_prompt: str,
         except Exception as e:  # noqa: BLE001
             print(f"  ⚠️ 表格生成失敗: {e}")
 
-    # 4) 視覺化（總結者指派給 Coder）
-    for chart in synthesis.get("charts", []):
+    # 視覺化：只有使用者要求時才畫，且一次畫好（同一版面）
+    if want_viz:
         try:
-            _render_chart(chart, resp)
+            _render_charts(synthesis.get("charts", []), resp)
         except Exception as e:  # noqa: BLE001
             print(f"  ⚠️ 圖表生成失敗: {e}")
 
     _trace(resp, "present", tables=len(resp.tables), images=len(resp.images))
+
+
+def _execute_tool_loop(plan: PlanningResult, user_prompt: str,
+                       file_registry: dict, resp: AgentResponse) -> None:
+    """統籌三階段：收集 → 整合 → 視覺化/表格 → 一起呈現。"""
+    evidence = _gather_evidence(plan, user_prompt, file_registry, resp)
+    print("\n  🧩 [Synthesize] 總結 agent 整合證據...")
+    want_viz = _wants_visualization(user_prompt, plan)
+    synthesis = _synthesize(user_prompt, plan, evidence, resp, want_viz)
+    _present_synthesis(synthesis, resp, file_registry, want_viz)
+
+
+# ============================================================
+# 共用建構器（run_financial_agent 與 graph.run 共用，避免兩處平行維護）
+# ============================================================
+def _build_planning_result(plan: PlanningResult) -> dict:
+    return {
+        "intent": plan.intent.value, "confidence": plan.confidence,
+        "steps": plan.steps, "first_tool": plan.first_tool, "reasoning": plan.reasoning,
+    }
+
+
+def _build_result(resp: AgentResponse) -> dict:
+    """把 AgentResponse 組成對前端的回傳 dict（單一來源，兩個入口共用）。"""
+    return {
+        "report_text": resp.report_text,
+        "figures": [],          # 舊欄位保留相容
+        "plotly_jsons": resp.plotly_jsons,
+        "tables": resp.tables,
+        "images": resp.images,
+        "thought_logs": resp.thought_logs,
+        "planning_result": resp.planning_result,
+        "route": resp.route,
+        "executed_sql": resp.executed_sql,
+        "trace": resp.trace,
+    }
 
 
 # ============================================================
@@ -1036,6 +1207,14 @@ def run_financial_agent(user_prompt: str, file_registry: dict = None,
 
     history: 先前對話（list of {"role","content"}，純文字），用於理解追問與保持脈絡。
     """
+    # LangGraph 編排（FA_USE_GRAPH=1）：交給 graph.py 跑同一套節點，回傳相同 dict
+    if RUNTIME.use_graph:
+        try:
+            import graph
+            return graph.run(user_prompt, file_registry or {}, history or [])
+        except Exception as e:  # noqa: BLE001
+            print(f"⚠️ LangGraph 執行失敗，回退原生流程: {e}")
+
     file_registry = file_registry or {}
     history = history or []
     resp = AgentResponse()
@@ -1051,10 +1230,7 @@ def run_financial_agent(user_prompt: str, file_registry: dict = None,
     t0 = time.perf_counter()
     plan = planning_phase(user_prompt, file_registry, history)
     plan_ms = round((time.perf_counter() - t0) * 1000, 1)
-    resp.planning_result = {
-        "intent": plan.intent.value, "confidence": plan.confidence,
-        "steps": plan.steps, "first_tool": plan.first_tool, "reasoning": plan.reasoning,
-    }
+    resp.planning_result = _build_planning_result(plan)
     print(f"  ├─ 意圖: {plan.intent.value} (信心 {plan.confidence})")
     print(f"  └─ 首要工具: {plan.first_tool or '無'}")
     _trace(resp, "planning", model=MODEL_CONFIG.planner,
@@ -1095,17 +1271,7 @@ def run_financial_agent(user_prompt: str, file_registry: dict = None,
     _trace(resp, "done", total_ms=round((time.perf_counter() - t_start) * 1000, 1),
            image_count=len(resp.images), table_count=len(resp.tables))
 
-    return {
-        "report_text": resp.report_text,
-        "figures": [],          # 預留給互動式 Plotly 圖（目前用 images 靜態圖）
-        "tables": resp.tables,
-        "images": resp.images,
-        "thought_logs": resp.thought_logs,
-        "planning_result": resp.planning_result,
-        "route": resp.route,
-        "executed_sql": resp.executed_sql,
-        "trace": resp.trace,
-    }
+    return _build_result(resp)
 
 
 # 便利別名

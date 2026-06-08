@@ -958,6 +958,8 @@ def _gather_evidence(plan: PlanningResult, user_prompt: str,
     ]
     tools = _gather_tools()
     evidence: List[str] = []
+    tool_used = False
+    nudged = False
 
     for step in range(1, RUNTIME.max_steps + 1):
         print(f"\n  [Gather {step}/{RUNTIME.max_steps}]")
@@ -974,9 +976,18 @@ def _gather_evidence(plan: PlanningResult, user_prompt: str,
 
         msg = api_resp.choices[0].message
         if not msg.tool_calls:
+            # 模型有時會直接以文字回答而不呼叫工具；若還沒撈到任何證據就先「催一次」
+            if tools and not tool_used and not nudged:
+                nudged = True
+                print("  ↪︎ 模型未呼叫工具，催促改用工具…")
+                messages.append({"role": "user", "content":
+                    "你必須使用上面提供的工具來實際取得資料（例如 get_database_schema 後 "
+                    "run_sql_query，或 search_knowledge_base），不可僅以文字回答或自行假設。請現在呼叫工具。"})
+                continue
             print("  └─ 收集完成")
             break
 
+        tool_used = True
         messages.append(msg)
         for tc in msg.tool_calls:
             func_name = tc.function.name

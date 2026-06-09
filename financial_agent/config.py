@@ -95,7 +95,7 @@ class RuntimeConfig:
 
     # ── Production refactor 功能開關（全部預設關閉，開啟才啟用新模組，確保零破壞）──
     hybrid_retrieval: bool = _bool_env("FA_HYBRID_RETRIEVAL")  # retrieval.py + query_processing.py
-    use_plotly: bool = _bool_env("FA_PLOTLY")                  # viz_plotly.py（互動圖）
+    use_plotly: bool = _bool_env("FA_PLOTLY", "1")            # viz_plotly.py（互動圖）— 預設開啟，與 Streamlit 整合較佳；設 0 回退 matplotlib
     concurrent_ocr: bool = _bool_env("FA_CONCURRENT_OCR")      # ocr_pipeline.py（並發OCR）
     struct_chunk: bool = _bool_env("FA_STRUCT_CHUNK")          # chunking.py（結構化分塊）
     use_graph: bool = _bool_env("FA_USE_GRAPH")                # graph.py（LangGraph 編排）

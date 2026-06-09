@@ -925,10 +925,39 @@ def handle_fast_translate(user_prompt: str) -> str:
     return translate_text({"text": user_prompt, "target_language": target}, {})
 
 
+def _run_freeform_plotly(task: str) -> dict:
+    """自由格式 Plotly 生成：給 Coder plotly 系統提示 + 任務描述，沙箱跑出 fig.to_json()。
+    與合成路徑共用 viz_plotly 的系統提示與 JSON 萃取器；首次失敗自動修復一次。
+    回傳 {plotly_jsons, code, output}。"""
+    from viz_plotly import PLOTLY_CODE_SYSTEM_PROMPT, extract_plotly_json
+
+    def _gen(user_msg: str) -> str:
+        raw = _chat(MODEL_CONFIG.coder,
+                    [{"role": "system", "content": PLOTLY_CODE_SYSTEM_PROMPT},
+                     {"role": "user", "content": user_msg}],
+                    temperature=0.2)
+        return _strip_code_fence(raw)
+
+    code = _gen(task + "\n\n只能使用上面明確提供的真實數據，不可捏造；"
+                       "腳本最後一行必須是 print(fig.to_json())。")
+    out, err = _run_script(code)
+    jsons = extract_plotly_json(out)
+    if not jsons and err:
+        code = _gen(f"修復下列程式碼錯誤後輸出完整程式碼（結尾必須 print(fig.to_json())）：\n"
+                    f"{code}\n\n錯誤訊息：\n{err}")
+        out, err = _run_script(code)
+        jsons = extract_plotly_json(out)
+    return {"plotly_jsons": jsons, "code": code, "output": out or err}
+
+
 def handle_visualize(user_prompt: str, plan: PlanningResult) -> dict:
-    """確定性視覺化：直接指定 Coder 生成繪圖碼並執行。"""
-    print("📈 [Visualize] 指定 Coder 生成繪圖程式碼...")
+    """確定性視覺化：直接指定 Coder 生成繪圖碼並執行。
+    預設產出互動式 Plotly（與 Streamlit 整合較佳）；FA_PLOTLY=0 時回退 matplotlib PNG。"""
     task = f"{user_prompt}\n\n（規劃補充：{plan.reasoning}）"
+    if RUNTIME.use_plotly:
+        print("📈 [Visualize] 指定 Coder 生成 Plotly 繪圖程式碼...")
+        return _run_freeform_plotly(task)
+    print("📈 [Visualize] 指定 Coder 生成 matplotlib 繪圖程式碼...")
     return run_python_code({"thought_process": task, "code": ""}, {})
 
 
@@ -1449,7 +1478,7 @@ def _render_charts(charts: List[dict], resp: AgentResponse) -> None:
 
     titles = "、".join(c.get("title", f"圖{i}") for i, c in enumerate(charts, 1))
 
-    # 互動式 Plotly 路徑（FA_PLOTLY=1）：產生 plotly 程式碼 → 沙箱執行 → 取 fig.to_json()
+    # 互動式 Plotly 路徑（預設；FA_PLOTLY 預設開）：產生 plotly 程式碼 → 沙箱執行 → 取 fig.to_json()
     if RUNTIME.use_plotly:
         from viz_plotly import generate_plotly
         def _coder_call(messages, temperature=0.2):
@@ -1463,7 +1492,7 @@ def _render_charts(charts: List[dict], resp: AgentResponse) -> None:
                output=_preview(result.get("stdout", "")))
         return
 
-    # 預設：matplotlib 靜態圖（單一 figure、子圖排版）
+    # 回退：matplotlib 靜態圖（FA_PLOTLY=0 時；單一 figure、子圖排版）
     n = len(charts)
     lines = [
         f"請用 matplotlib 在「單一張圖（一個 figure）」中，以子圖 subplots 排版呈現以下 {n} 個圖表。",
@@ -1643,10 +1672,12 @@ def run_financial_agent(user_prompt: str, file_registry: dict = None,
                report_text=_preview(resp.report_text, 2000))
     elif route == "visualize":
         result = handle_visualize(user_prompt, plan)
+        resp.plotly_jsons.extend(result.get("plotly_jsons", []))
         if result.get("plot"):
             resp.images.append(result["plot"])
-        resp.report_text = result.get("output", "圖表已生成。")
+        resp.report_text = result.get("output") or "圖表已生成。"
         _trace(resp, "visualize", model=MODEL_CONFIG.coder,
+               engine="plotly" if RUNTIME.use_plotly else "matplotlib",
                code=_preview(result.get("code", ""), 2000),
                output=_preview(result.get("output", "")))
     else:  # execute_tools

@@ -1693,6 +1693,19 @@ def _synthesize(user_prompt: str, plan: PlanningResult,
         if prog_charts:
             charts = prog_charts
 
+    # 穩健收尾：fallback 模型常無視「不要輸出 JSON」，把整包 {report,charts,tables}
+    # 當文字回來。若 report 仍是這種 JSON 字串，就把真正的 report 欄抽出來，
+    # 避免前端顯示一坨 JSON、看起來像「圖畫不出來」。
+    if isinstance(report, str) and report.lstrip().startswith("{") and '"report"' in report:
+        try:
+            d2 = _extract_json(report)
+            if isinstance(d2, dict) and d2.get("report"):
+                report = str(d2["report"]).strip()
+                if not tables:
+                    tables = d2.get("tables", []) or []
+        except Exception:  # noqa: BLE001
+            pass
+
     _trace(resp, "synthesis", model=used_model,
            duration_ms=round((time.perf_counter() - t0) * 1000, 1),
            report_text=_preview(report, 2000),

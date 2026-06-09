@@ -117,7 +117,11 @@ def _render_plotly_jsons(jsons):
     """把 plotly JSON 字串還原成互動圖渲染。"""
     if not jsons:
         return
-    import plotly.io as pio
+    try:
+        import plotly.io as pio
+    except Exception as e:  # noqa: BLE001  plotly 沒裝就明說，別讓整個區塊靜默掛掉
+        st.warning(f"⚠️ 需要安裝 plotly 才能顯示互動圖（pip install plotly）：{e}")
+        return
     for j in jsons:
         try:
             st.plotly_chart(pio.from_json(j), use_container_width=True)

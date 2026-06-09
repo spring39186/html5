@@ -405,6 +405,43 @@ def _should_vision_ocr(text_layer: str, has_images: bool) -> bool:
     return False
 
 
+def _text_layer_markdown(page, plain_text: str) -> str:
+    """文字層直抽時，用 PyMuPDF 內建表格辨識把『原生向量表格』轉成 Markdown。
+
+    直接 get_text() 會把表格行列幾何打散（科目和數字拆成不同行），LLM 對不回去。
+    find_tables() 能把表格還原成 | 科目 | 2025 | 2024 | 結構，不花 vision token。
+    非表格文字照常保留；依垂直位置排序維持閱讀順序；無表格/舊版 fitz 不支援時回退純文字。"""
+    try:
+        tables = page.find_tables().tables
+    except Exception:  # noqa: BLE001  舊版 PyMuPDF 無 find_tables
+        return plain_text
+    if not tables:
+        return plain_text
+
+    table_rects = [fitz.Rect(t.bbox) for t in tables]
+    items: List[Tuple[float, str]] = []  # (頁面 y 座標, 內容) → 用來保留上下順序
+
+    # 非表格區塊的文字（用 bbox 與表格區域比對，避免和 Markdown 表格重複）
+    for block in page.get_text("blocks"):
+        txt = block[4]
+        if not isinstance(txt, str) or not txt.strip():
+            continue  # 跳過圖片區塊（block[4] 非字串）與空白塊
+        rect = fitz.Rect(block[:4])
+        if not any(rect.intersects(tr) for tr in table_rects):
+            items.append((rect.y0, txt.strip()))
+
+    # 表格轉 Markdown（LLM 能精準定位橫列/縱欄）
+    for tbl, rect in zip(tables, table_rects):
+        try:
+            items.append((rect.y0, tbl.to_markdown()))
+        except Exception:  # noqa: BLE001
+            pass
+
+    items.sort(key=lambda it: it[0])
+    return "\n\n".join(c for _, c in items) if items else plain_text
+
+
+
 def _cache_path(pdf_path: str) -> str:
     return os.path.join(RUNTIME.cache_dir, f"{os.path.basename(pdf_path)}.md")
 
@@ -510,9 +547,9 @@ def parse_financial_pdf(args: dict, file_registry: dict) -> str:
                     use_vision = (not RUNTIME.lazy_ocr) or _should_vision_ocr(text_layer, has_images)
 
                     if not use_vision:
-                        # 直接用文字層，不呼叫 vision（省成本）
+                        # 直接用文字層，不呼叫 vision（省成本）；表格用 find_tables 還原成 Markdown
                         print(f"  📄 第 {page_num + 1}/{total_pages} 頁：文字層直抽")
-                        content = text_layer
+                        content = _text_layer_markdown(page, text_layer)
                     else:
                         vision_pages += 1
                         print(f"  🔍 第 {page_num + 1}/{total_pages} 頁：vision OCR")

@@ -409,22 +409,34 @@ def _cache_path(pdf_path: str) -> str:
     return os.path.join(RUNTIME.cache_dir, f"{os.path.basename(pdf_path)}.md")
 
 
+_CJK_RE = re.compile(r"[぀-ヿ一-鿿]")  # 日文假名 + 中日漢字
+
+
+def _needs_translation(text: str) -> bool:
+    """需要翻成英文嗎？太短、或整段沒有中日文字（已是英文）→ 免翻，省一次 LLM 呼叫。"""
+    return len(text.strip()) >= 20 and bool(_CJK_RE.search(text))
+
+
 def _normalize_to_english(full_text: str) -> str:
-    """把多語言 OCR 內容逐頁翻成英文（保留表格/數字/結構），統一語言以利檢索與整合。"""
+    """把多語言 OCR 內容逐頁翻成英文（保留表格/數字/結構），統一語言以利檢索與整合。
+    最佳化：已是英文（整段無中日文字）的頁直接略過免翻；其餘頁並行翻譯（保留頁序）。"""
+    from concurrent.futures import ThreadPoolExecutor
     from ocr_pipeline import TRANSLATION_SYSTEM_PROMPT  # 共用同一份翻譯指令，避免兩路徑不一致
-    out = []
-    for sec in full_text.split("\n\n---\n\n"):
-        if len(sec.strip()) < 20:
-            out.append(sec)
-            continue
+
+    def _translate(sec: str) -> str:
+        if not _needs_translation(sec):
+            return sec
         try:
-            out.append(_chat(MODEL_CONFIG.coder,
-                             [{"role": "system", "content": TRANSLATION_SYSTEM_PROMPT},
-                              {"role": "user", "content": sec}],
-                             temperature=0.1))
+            return _chat(MODEL_CONFIG.coder,
+                         [{"role": "system", "content": TRANSLATION_SYSTEM_PROMPT},
+                          {"role": "user", "content": sec}],
+                         temperature=0.1)
         except Exception:  # noqa: BLE001
-            out.append(sec)  # 翻譯失敗保留原文
-    return "\n\n---\n\n".join(out)
+            return sec  # 翻譯失敗保留原文
+
+    secs = full_text.split("\n\n---\n\n")
+    with ThreadPoolExecutor(max_workers=max(1, RUNTIME.gather_workers)) as ex:
+        return "\n\n---\n\n".join(ex.map(_translate, secs))  # ex.map 保留輸入順序
 
 
 def parse_financial_pdf(args: dict, file_registry: dict) -> str:
@@ -460,7 +472,7 @@ def parse_financial_pdf(args: dict, file_registry: dict) -> str:
                 ]}], temperature=0.0, max_tokens=4096)
 
         def _translate_call(p: int, md: str) -> str:
-            if not normalize or len(md.strip()) < 20:
+            if not normalize or not _needs_translation(md):
                 return md
             return _chat(MODEL_CONFIG.coder,
                 [{"role": "system", "content": TRANSLATION_SYSTEM_PROMPT},

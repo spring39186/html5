@@ -14,6 +14,31 @@ from agent import run_financial_agent
 from config import MODEL_CONFIG
 import export_utils
 
+
+def _silence_windows_proactor_reset() -> None:
+    """Windows 的 asyncio Proactor 在連線被對方強制關閉時，清理階段會噴
+    ConnectionResetError（WinError 10054）的假錯誤堆疊——純連線收尾噪音，請求其實已完成、
+    不影響功能。這裡只在 Windows 包一層把這個特定例外吞掉，讓 console 乾淨。"""
+    import sys
+    if not sys.platform.startswith("win"):
+        return
+    try:
+        from asyncio.proactor_events import _ProactorBasePipeTransport
+        _orig = _ProactorBasePipeTransport._call_connection_lost
+
+        def _quiet(self, exc):
+            try:
+                _orig(self, exc)
+            except ConnectionResetError:
+                pass  # 連線已被對方關閉，收尾噪音，忽略
+
+        _ProactorBasePipeTransport._call_connection_lost = _quiet
+    except Exception:  # noqa: BLE001  內部 API 變動就放著，純噪音、不影響功能
+        pass
+
+
+_silence_windows_proactor_reset()
+
 st.set_page_config(page_title="AI 財務智能審計系統", layout="wide")
 st.title("📊 AI 財務智能審計與知識庫系統")
 st.markdown("結合 Vision 模型與多模型協作架構的動態財務分析平台")

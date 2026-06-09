@@ -926,28 +926,20 @@ def handle_fast_translate(user_prompt: str) -> str:
 
 
 def _run_freeform_plotly(task: str) -> dict:
-    """自由格式 Plotly 生成：給 Coder plotly 系統提示 + 任務描述，沙箱跑出 fig.to_json()。
-    與合成路徑共用 viz_plotly 的系統提示與 JSON 萃取器；首次失敗自動修復一次。
-    回傳 {plotly_jsons, code, output}。"""
-    from viz_plotly import PLOTLY_CODE_SYSTEM_PROMPT, extract_plotly_json
+    """自由格式 Plotly 生成：使用者直接給數據要畫圖時用。共用 viz_plotly 的
+    核心管線（產碼→沙箱執行→失敗修復→萃取 fig.to_json()），只是改餵自由格式
+    任務描述而非結構化 chart spec。回傳 {plotly_jsons, code, output}。"""
+    from viz_plotly import run_plotly_from_message
 
-    def _gen(user_msg: str) -> str:
-        raw = _chat(MODEL_CONFIG.coder,
-                    [{"role": "system", "content": PLOTLY_CODE_SYSTEM_PROMPT},
-                     {"role": "user", "content": user_msg}],
-                    temperature=0.2)
-        return _strip_code_fence(raw)
+    def _coder_call(messages, temperature=0.2):
+        return _chat(MODEL_CONFIG.coder, messages, temperature=temperature)
 
-    code = _gen(task + "\n\n只能使用上面明確提供的真實數據，不可捏造；"
+    user_msg = (task + "\n\n只能使用上面明確提供的真實數據，不可捏造；"
                        "腳本最後一行必須是 print(fig.to_json())。")
-    out, err = _run_script(code)
-    jsons = extract_plotly_json(out)
-    if not jsons and err:
-        code = _gen(f"修復下列程式碼錯誤後輸出完整程式碼（結尾必須 print(fig.to_json())）：\n"
-                    f"{code}\n\n錯誤訊息：\n{err}")
-        out, err = _run_script(code)
-        jsons = extract_plotly_json(out)
-    return {"plotly_jsons": jsons, "code": code, "output": out or err}
+    result = run_plotly_from_message(user_msg, _coder_call, _run_script, max_repair=1)
+    return {"plotly_jsons": result.get("plotly_jsons", []),
+            "code": result.get("code", ""),
+            "output": result.get("stdout") or result.get("stderr") or ""}
 
 
 def handle_visualize(user_prompt: str, plan: PlanningResult) -> dict:

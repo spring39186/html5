@@ -28,16 +28,21 @@ if "messages" not in st.session_state:
     ]
 if "file_registry" not in st.session_state:
     st.session_state.file_registry = {}
+if "uploader_version" not in st.session_state:
+    st.session_state.uploader_version = 0  # 清空知識庫時 +1，換 uploader 的 key 強制清空它
 
 # ------------------------------------------------------------
 # 2. 側邊欄：知識庫管理
 # ------------------------------------------------------------
 with st.sidebar:
     st.header("📂 知識庫管理")
+    # uploader 帶版本 key：清空知識庫時換 key，Streamlit 會把它重置成空，
+    # 否則 rerun 時殘留的上傳檔會把 file_registry 又塞回來（清不掉的主因）。
     uploaded_files = st.file_uploader(
         "上傳文件 (財報、合約、技術報告...)",
         type=["pdf", "txt", "docx"],
         accept_multiple_files=True,
+        key=f"kb_uploader_{st.session_state.uploader_version}",
     )
     if uploaded_files:
         os.makedirs("temp_dir", exist_ok=True)
@@ -54,6 +59,15 @@ with st.sidebar:
         with st.expander("目前知識庫內容", expanded=True):
             for name in st.session_state.file_registry:
                 st.write(f"📄 {name}")
+        if st.button("🗑️ 清空知識庫", use_container_width=True,
+                     help="移除所有已上傳檔案與其向量，徹底清空知識庫。"):
+            import shutil
+            removed = agent_mod.clear_knowledge_base()  # 清向量
+            st.session_state.file_registry = {}
+            shutil.rmtree("temp_dir", ignore_errors=True)  # 清暫存上傳檔
+            st.session_state.uploader_version += 1  # 換 key → uploader 清空，rerun 不再塞回
+            st.success(f"✅ 已清空知識庫（移除 {removed} 個向量區塊）")
+            st.rerun()
 
     st.divider()
     st.markdown("### 💾 匯出對話與思考流程")

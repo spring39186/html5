@@ -76,6 +76,20 @@ collection = chroma_client.get_or_create_collection(
 
 os.makedirs(RUNTIME.cache_dir, exist_ok=True)
 
+
+def clear_knowledge_base() -> int:
+    """清空整個向量知識庫（刪掉所有已入庫 chunk），回傳刪除的區塊數。
+    供前端「清空知識庫」用：移除上傳檔後，殘留向量仍會被檢索到，必須一併清掉。"""
+    try:
+        got = collection.get()
+        ids = (got or {}).get("ids", []) or []
+        if ids:
+            collection.delete(ids=ids)
+        return len(ids)
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠️ 清空知識庫失敗: {e}")
+        return 0
+
 # MCP 橋接（agent 當 MCP client）。預設關閉，FA_USE_MCP=1 才啟用。
 MCP_BRIDGE = None
 MCP_TOOL_NAMES: set = set()

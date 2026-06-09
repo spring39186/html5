@@ -56,10 +56,16 @@ def _fmt_trace_event(ev: dict) -> str:
     head = f"- **[{phase}]** `{ts}`"
     parts = [head]
 
+    def _sec(ms):
+        try:
+            return f"{float(ms) / 1000:.2f} s"
+        except Exception:  # noqa: BLE001
+            return f"{ms} ms"
+
     if "duration_ms" in ev:
-        parts[0] += f" — ⏱ {ev['duration_ms']} ms"
+        parts[0] += f" — ⏱ {_sec(ev['duration_ms'])}"
     if "total_ms" in ev:
-        parts[0] += f" — ⏱ 總計 {ev['total_ms']} ms"
+        parts[0] += f" — ⏱ 總計 {_sec(ev['total_ms'])}"
 
     for key in ("route", "intent", "confidence", "model", "first_tool", "tool", "step"):
         if key in ev:

@@ -1515,6 +1515,20 @@ def _build_result(resp: AgentResponse) -> dict:
     }
 
 
+# 純問候語白名單（去掉標點後「完全等於」才算，分析請求絕不會誤判）
+_GREETINGS = {
+    "你好", "妳好", "您好", "哈囉", "哈嘍", "嗨", "hi", "hello", "hey", "yo",
+    "早安", "午安", "晚安", "在嗎", "在不在", "你在嗎", "謝謝", "謝啦", "感謝",
+    "thanks", "thankyou", "thx", "掰掰", "bye", "ok", "好", "好的", "嗨嗨",
+}
+
+
+def _is_greeting(user_prompt: str) -> bool:
+    """是否為純問候/閒聊（去標點後完全等於白名單詞）。保守判斷，避免把分析請求誤當招呼。"""
+    cleaned = re.sub(r"[\s,，。!！?？~、.…\-—）（()]+", "", (user_prompt or "").lower())
+    return cleaned in _GREETINGS
+
+
 # ============================================================
 # 主執行入口
 # ============================================================
@@ -1536,6 +1550,19 @@ def run_financial_agent(user_prompt: str, file_registry: dict = None,
 
     file_registry = file_registry or {}
     history = history or []
+
+    # 招呼語快速通道：純問候/閒聊（且無上傳檔案）直接回覆，跳過 planning 那次大模型呼叫，省一半時間
+    if not file_registry and _is_greeting(user_prompt):
+        resp = AgentResponse()
+        _progress("💬 回覆中…")
+        resp.route = "fast_chat"
+        resp.planning_result = {"intent": "chat", "confidence": 1.0, "steps": [],
+                                "first_tool": None, "reasoning": "招呼語快速通道（略過規劃）"}
+        _trace(resp, "request", user_prompt=user_prompt, quick_chat=True)
+        resp.report_text = handle_fast_chat(user_prompt, history)
+        _trace(resp, "fast_path", route="fast_chat", model=MODEL_CONFIG.chat)
+        return _build_result(resp)
+
     resp = AgentResponse()
     t_start = time.perf_counter()
     _trace(resp, "request", user_prompt=user_prompt,

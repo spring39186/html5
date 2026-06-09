@@ -89,6 +89,12 @@ def _fmt_trace_event(ev: dict) -> str:
         except Exception:  # noqa: BLE001
             _ex = str(ev["extracted"])
         parts.append(f"  - 抽數結果（原始 → 換算後）:\n\n```json\n{_ex}\n```")
+    if ev.get("corrections"):
+        try:
+            _c = json.dumps(ev["corrections"], ensure_ascii=False, indent=2, default=str)
+        except Exception:  # noqa: BLE001
+            _c = str(ev["corrections"])
+        parts.append(f"  - ⚠️ 健全性校正（利益 > 營收，多為 10x 單位錯）:\n\n```json\n{_c}\n```")
     if ev.get("code"):
         parts.append(f"  - 生成程式碼:\n\n```python\n{ev['code']}\n```")
     if ev.get("output"):

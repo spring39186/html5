@@ -41,10 +41,12 @@ _TARGET_MULT = {  # 目標單位 → 倍率
 }
 
 
+_FULLWIDTH = str.maketrans("０１２３４５６７８９．，", "0123456789.,")  # 全形→半形（建一次重用）
+
+
 def _to_float(s: str):
     """把含千分位/全形數字的字串轉 float；失敗回 None。"""
-    s = (s or "").translate(str.maketrans("０１２３４５６７８９．，", "0123456789.,"))
-    s = s.replace(",", "").strip()
+    s = (s or "").translate(_FULLWIDTH).replace(",", "").strip()
     try:
         return float(s)
     except (ValueError, TypeError):

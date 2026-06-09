@@ -1242,7 +1242,11 @@ def _gather_files_deterministic(user_prompt: str, file_registry: dict,
             used += len(block)
             evidence.append(block)
 
-    _trace(resp, "gather_done", evidence_count=len(evidence), mode="deterministic")
+    # 把實際餵給抽數的證據原文也記進 log（每塊截斷），方便事後判斷某年某指標
+    # 「是 OCR 沒抓到」還是「抓到了但沒被檢索/抽出」
+    evidence_preview = "\n\n".join(_preview(b, 600) for b in evidence)
+    _trace(resp, "gather_done", evidence_count=len(evidence), mode="deterministic",
+           evidence_preview=evidence_preview)
     return evidence
 
 

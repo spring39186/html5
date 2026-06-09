@@ -95,6 +95,8 @@ def _fmt_trace_event(ev: dict) -> str:
         except Exception:  # noqa: BLE001
             _c = str(ev["corrections"])
         parts.append(f"  - ⚠️ 健全性校正（利益 > 營收，多為 10x 單位錯）:\n\n```json\n{_c}\n```")
+    if ev.get("evidence_preview"):
+        parts.append(f"  - 證據預覽（實際餵給抽數的內容）:\n\n```\n{ev['evidence_preview']}\n```")
     if ev.get("code"):
         parts.append(f"  - 生成程式碼:\n\n```python\n{ev['code']}\n```")
     if ev.get("output"):

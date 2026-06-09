@@ -1473,10 +1473,12 @@ def _sanity_fix_amounts(norm: dict, resp: AgentResponse) -> dict:
     metrics = norm.get("metrics", {})
     corrections = []
 
-    # ① 跨年量級一致性：偏離中位數超過約 5 倍 → snap 回最接近中位數的 10 次方
+    # ① 營收跨年量級一致性：偏離中位數約 10x → snap 回最接近的 10 次方。
+    #    只用在「營收」——它是 ②利益≤營收 的錨點、且最可靠；對利益類做中位數投票，
+    #    遇到某指標有 2/3 年同向 10x 時會把唯一正確的那年也帶歪，故利益類一律交給 ②。
     for metric, ymap in metrics.items():
-        if not isinstance(ymap, dict) or _is_ratio_metric(metric):
-            continue  # 每股/比率不做跨年量級檢查（量級本就可能差很多）
+        if not isinstance(ymap, dict) or _role_of(metric) != "revenue":
+            continue
         vals = sorted(v for v in ymap.values() if isinstance(v, (int, float)) and v > 0)
         if len(vals) < 3:
             continue  # 樣本太少，無從判斷誰是離群

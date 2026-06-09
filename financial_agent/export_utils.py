@@ -83,6 +83,12 @@ def _fmt_trace_event(ev: dict) -> str:
             parts.append(f"  - 參數: `{ev['args']}`")
     if ev.get("result_preview"):
         parts.append(f"  - 結果: {ev['result_preview']}")
+    if ev.get("extracted"):
+        try:
+            _ex = json.dumps(ev["extracted"], ensure_ascii=False, indent=2, default=str)
+        except Exception:  # noqa: BLE001
+            _ex = str(ev["extracted"])
+        parts.append(f"  - 抽數結果（原始 → 換算後）:\n\n```json\n{_ex}\n```")
     if ev.get("code"):
         parts.append(f"  - 生成程式碼:\n\n```python\n{ev['code']}\n```")
     if ev.get("output"):

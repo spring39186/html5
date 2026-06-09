@@ -1450,6 +1450,8 @@ def _extract_metrics(user_prompt: str, evidence_text: str, resp: AgentResponse) 
         normalized = _normalize_extracted(data)  # 程式化：剔除預測欄 + 單位換算成百萬
         _trace(resp, "metric_extraction", years=normalized.get("years"),
                metric_count=len(normalized.get("metrics", {})),
+               extracted={"原始（模型讀到的 v/u/src）": data.get("metrics", data),
+                          "換算後（百萬，已剔除預測）": normalized.get("metrics", {})},
                duration_ms=round((time.perf_counter() - t0) * 1000, 1))
         return normalized
     except Exception as e:  # noqa: BLE001

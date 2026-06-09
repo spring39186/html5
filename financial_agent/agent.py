@@ -360,18 +360,21 @@ def route_by_intent(plan: PlanningResult, file_registry: Dict[str, str]) -> str:
     intent = plan.intent
     th = RUNTIME.fastpath_confidence
 
-    # ── 有上傳檔案：除了純閒聊/純翻譯，全部走工具迴圈 ──
+    # 規劃器一旦判為 chat，就一律走 fast_chat（不再用 confidence 卡關）。
+    # 不對稱原則：把任務誤當聊天只是「回一句、使用者再問」的小代價；
+    # 把聊天誤當任務卻會觸發 9 分鐘 gather + 逾時，代價慘重。
+    # 信心低代表「拿不準」——拿不準時當聊天，比硬塞進完整工具流程安全。
+    if intent == IntentType.CHAT:
+        return "fast_chat"
+
+    # ── 有上傳檔案：除了純翻譯，全部走工具迴圈 ──
     # （含 visualization：要先解析檔案拿到真實數據，才能畫真實的圖）
     if file_registry:
-        if intent == IntentType.CHAT and conf >= th:
-            return "fast_chat"
         if intent == IntentType.TRANSLATION:
             return "fast_translate"
         return "execute_tools"
 
     # ── 無上傳檔案 ──
-    if intent == IntentType.CHAT and conf >= th:
-        return "fast_chat"
     if intent == IntentType.TRANSLATION:
         return "fast_translate"
     # 只有「不需檔案、非多檔、非多步」的純畫圖才走捷徑

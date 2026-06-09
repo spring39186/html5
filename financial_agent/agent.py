@@ -1425,13 +1425,12 @@ _PER_SHARE_OR_RATIO = ("eps", "每股", "盈餘", "盈利", "per share", "margin
 
 # 財務角色關鍵字（把模型自訂的指標名對應到角色，做恆等式健全性檢查）
 _ROLE_REVENUE = ("營收", "营收", "revenue", "net sales", "sales", "売上", "turnover")
-_ROLE_CONSTRAINED = ("營業利益", "营业利益", "operating", "営業利益",      # 營業利益
-                     "淨利", "净利", "net income", "net profit",          # 淨利
-                     "profit attributable", "当期純利益", "純利益")
-_SANITY_SCALES = (0.1, 0.01, 0.001)  # 單位錯一律是 10 的次方；由大到小試最小校正
-_EPS_KEYS = ("eps", "每股", "per share", "earnings per share")
 _NET_INCOME_KEYS = ("淨利", "净利", "net income", "net profit", "profit attributable",
                     "当期純利益", "純利益", "profit for the year")
+_OPERATING_KEYS = ("營業利益", "营业利益", "operating", "営業利益")
+_ROLE_CONSTRAINED = _OPERATING_KEYS + _NET_INCOME_KEYS  # 利益類：不該 > 同年營收
+_SANITY_SCALES = (0.1, 0.01, 0.001)  # 單位錯一律是 10 的次方；由大到小試最小校正
+_EPS_KEYS = ("eps", "每股", "per share", "earnings per share")
 
 
 def _role_of(metric: str) -> str:

@@ -127,11 +127,59 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
+# ── 進度回呼：前端可註冊 hook，即時顯示「思考中…」狀態，避免使用者以為當機 ──
+_PROGRESS_HOOK = None
+
+
+def set_progress_hook(fn) -> None:
+    """前端註冊一個 fn(message:str) 來即時接收進度；傳 None 取消。"""
+    global _PROGRESS_HOOK
+    _PROGRESS_HOOK = fn
+
+
+def _progress(message: str) -> None:
+    """回報一句進度給前端（hook 失敗不影響主流程）。"""
+    if _PROGRESS_HOOK is not None:
+        try:
+            _PROGRESS_HOOK(message)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+# trace phase → 使用者看得懂的進度短語（其餘 phase 不顯示）
+def _phase_message(phase: str, event: dict):
+    if phase == "planning":
+        return f"🧠 意圖分析完成：{event.get('intent', '')}（信心 {event.get('confidence', '')}）"
+    if phase == "routing":
+        return f"🔀 規劃路由：{event.get('route', '')}"
+    if phase == "tool_call":
+        tool = event.get("tool", "")
+        args = event.get("args", {}) or {}
+        detail = args.get("file_name") or args.get("search_query") or args.get("sql") or ""
+        names = {"parse_financial_pdf": "📄 解析檔案", "search_knowledge_base": "🔎 檢索",
+                 "get_database_schema": "🗂️ 讀取資料庫結構", "run_sql_query": "📊 查詢資料庫"}
+        return f"{names.get(tool, '🔧 ' + tool)}：{str(detail)[:50]}"
+    if phase == "gather_done":
+        return f"📚 證據收集完成（{event.get('evidence_count', '')} 筆）"
+    if phase == "metric_extraction":
+        return "🔢 抽取各年度數據完成"
+    if phase == "synthesis":
+        return "🧩 報告整合完成"
+    if phase == "charts":
+        return "📈 圖表繪製完成"
+    if phase == "present":
+        return "🖼️ 整理輸出中…"
+    return None
+
+
 def _trace(resp: "AgentResponse", phase: str, **fields) -> None:
     """記錄一筆執行軌跡事件，含時間戳。"""
     event = {"phase": phase, "ts": _now_iso()}
     event.update({k: v for k, v in fields.items() if v is not None})
     resp.trace.append(event)
+    msg = _phase_message(phase, event)
+    if msg:
+        _progress(msg)
 
 
 def _preview(value: Any, limit: int = 800) -> str:
@@ -1291,6 +1339,7 @@ def _synthesize(user_prompt: str, plan: PlanningResult,
     # 量化任務：先做程式化抽數，得到權威的「年度×指標」表（非量化問題則跳過）
     extracted = None
     if evidence and _needs_metric_extraction(user_prompt, plan, want_viz):
+        _progress("🔢 抽取各年度關鍵數據中…")
         extracted = _extract_metrics(user_prompt, evidence_text, resp)
 
     viz_rule = ("使用者本次「有要求」視覺化，charts 可填入需要的圖表規格。"
@@ -1429,10 +1478,14 @@ def _present_synthesis(synthesis: dict, resp: AgentResponse,
 def _execute_tool_loop(plan: PlanningResult, user_prompt: str,
                        file_registry: dict, resp: AgentResponse) -> None:
     """統籌三階段：收集 → 整合 → 視覺化/表格 → 一起呈現。"""
+    _progress("📂 解析檔案、收集證據中…")
     evidence = gather(plan, user_prompt, file_registry, resp)
     print("\n  🧩 [Synthesize] 總結 agent 整合證據...")
+    _progress("🧩 整合分析、撰寫報告中…（這步較久，請稍候）")
     want_viz = _wants_visualization(user_prompt, plan)
     synthesis = _synthesize(user_prompt, plan, evidence, resp, want_viz)
+    if want_viz:
+        _progress("📈 繪製圖表中…")
     _present_synthesis(synthesis, resp, file_registry, want_viz)
 
 
@@ -1493,6 +1546,7 @@ def run_financial_agent(user_prompt: str, file_registry: dict = None,
 
     # Phase 1: 規劃
     print("\n" + "=" * 60 + "\n🧠 [Phase 1] Qwen 意圖分析\n" + "=" * 60)
+    _progress("🧠 分析你的意圖中…")
     t0 = time.perf_counter()
     plan = planning_phase(user_prompt, file_registry, history)
     plan_ms = round((time.perf_counter() - t0) * 1000, 1)

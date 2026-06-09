@@ -441,8 +441,34 @@ def _text_layer_markdown(page, plain_text: str) -> str:
     return "\n\n".join(c for _, c in items) if items else plain_text
 
 
+# 快取版本：抽取/正規化邏輯升級時 +1，舊版快取檔名不符 → 自動失效重跑，免手動清 ocr_cache。
+# v2：文字層改用 find_tables 還原表格 Markdown（取代舊的 get_text 亂序抽取）。
+_OCR_CACHE_VERSION = "2"   # OCR/表格抽取邏輯
+_NORM_CACHE_VERSION = "1"  # 英文正規化邏輯（OCR 版本變動會連帶讓 .en 失效，不必重複 +1）
+
+
 def _cache_path(pdf_path: str) -> str:
-    return os.path.join(RUNTIME.cache_dir, f"{os.path.basename(pdf_path)}.md")
+    """OCR 抽取結果的快取路徑（含版本）。"""
+    return os.path.join(RUNTIME.cache_dir,
+                        f"{os.path.basename(pdf_path)}.v{_OCR_CACHE_VERSION}.md")
+
+
+def _norm_cache_path(cache_file: str) -> str:
+    """英文正規化結果的快取路徑（疊在 OCR 快取上，含正規化版本）。"""
+    return f"{cache_file}.en.v{_NORM_CACHE_VERSION}.md"
+
+
+def _purge_stale_caches(pdf_path: str, keep: set) -> None:
+    """刪掉這份 PDF 不屬於目前版本的舊快取（版本升級後自動清理，免手動清）。"""
+    import glob
+    pattern = os.path.join(RUNTIME.cache_dir,
+                           glob.escape(os.path.basename(pdf_path)) + "*.md*")
+    for f in glob.glob(pattern):
+        if f not in keep:
+            try:
+                os.remove(f)
+            except OSError:
+                pass
 
 
 _CJK_RE = re.compile(r"[぀-ヿ一-鿿]")  # 日文假名 + 中日漢字
@@ -522,6 +548,8 @@ def parse_financial_pdf(args: dict, file_registry: dict) -> str:
         total_pages = full_text.count("## 第") or 1
     else:
         cache_file = _cache_path(pdf_path)
+        norm_cache = _norm_cache_path(cache_file)
+        _purge_stale_caches(pdf_path, {cache_file, norm_cache})  # 清掉舊版本快取（免手動清）
         if os.path.exists(cache_file):
             print(f"🔄 [Cache Hit] {cache_file}")
             with open(cache_file, "r", encoding="utf-8") as f:
@@ -579,7 +607,6 @@ def parse_financial_pdf(args: dict, file_registry: dict) -> str:
 
         # 選用：統一翻成英文再入庫
         if normalize:
-            norm_cache = cache_file + ".en.md"
             if os.path.exists(norm_cache):
                 print(f"🔄 [Norm Cache] {norm_cache}")
                 with open(norm_cache, "r", encoding="utf-8") as f:

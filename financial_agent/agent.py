@@ -459,7 +459,7 @@ def _text_layer_markdown(page, plain_text: str) -> str:
 # v2：文字層改用 find_tables 還原表格 Markdown（取代舊的 get_text 亂序抽取）。
 # v3：實測 find_tables 不穩、易漏數據 → 預設改回全頁 vision OCR，失效 v2 的表格快取。
 _OCR_CACHE_VERSION = "3"   # OCR/表格抽取邏輯
-_NORM_CACHE_VERSION = "1"  # 英文正規化邏輯（OCR 版本變動會連帶讓 .en 失效，不必重複 +1）
+_NORM_CACHE_VERSION = "2"  # 英文正規化邏輯（v2：翻譯保留 億/万/兆 原字，不准譯成 billion/million）
 
 
 def _cache_path(pdf_path: str) -> str:
@@ -1444,6 +1444,7 @@ _NET_INCOME_KEYS = ("淨利", "净利", "net income", "net profit", "profit attr
 _OPERATING_KEYS = ("營業利益", "营业利益", "operating", "営業利益")
 _ROLE_CONSTRAINED = _OPERATING_KEYS + _NET_INCOME_KEYS  # 利益類：不該 > 同年營收
 _SANITY_SCALES = (0.1, 0.01, 0.001)  # 單位錯一律是 10 的次方；由大到小試最小校正
+_SNAP_FACTORS = (0.001, 0.01, 0.1, 1, 10, 100, 1000)  # 跨年離群 snap 用的 10 次方倍率
 _EPS_KEYS = ("eps", "每股", "per share", "earnings per share")
 
 
@@ -1459,12 +1460,32 @@ def _role_of(metric: str) -> str:
 
 def _sanity_fix_amounts(norm: dict, resp: AgentResponse) -> dict:
     """財務恆等式防呆（純程式、確定性，只用相對關係，與公司/幣別無關）：
-    ① 利益類（營業利益/淨利）不該 > 同年營收 → 多為 10x 單位錯，試 10 的次方校正回合理區間。
-    ② EPS（每股）= 淨利 ÷ 股數，必遠小於淨利（百萬）；若同量級 → 多為 OCR 把淨利總額
-       錯標成 EPS → 標 null。校正不出來/判定誤抓就標 null（寧缺勿錯，不讓錯值進報告/圖表）。"""
+    ① 同一金額指標跨年應同數量級；某年偏離中位數約 10x（多為翻譯/OCR 把 億 當 billion 之類
+       的單位錯）→ snap 回最接近中位數的 10 次方。能攔「營收+利益一起 10x、比例不變」的情況。
+    ② 利益類（營業利益/淨利）不該 > 同年營收 → 試 10 的次方校正回合理區間。
+    ③ EPS（每股）= 淨利 ÷ 股數，必遠小於淨利（百萬）；若同量級 → 多為 OCR 把淨利總額
+       錯標成 EPS → 標 null。判定不出合理值就標 null（寧缺勿錯，不讓錯值進報告/圖表）。"""
     metrics = norm.get("metrics", {})
+    corrections = []
 
-    def _col(keys):  # 第一個名稱符合的指標的 {年: 數值}
+    # ① 跨年量級一致性：偏離中位數超過約 5 倍 → snap 回最接近中位數的 10 次方
+    for metric, ymap in metrics.items():
+        if not isinstance(ymap, dict) or any(k in metric.lower() for k in _PER_SHARE_OR_RATIO):
+            continue  # 每股/比率不做跨年量級檢查（量級本就可能差很多）
+        vals = sorted(v for v in ymap.values() if isinstance(v, (int, float)) and v > 0)
+        if len(vals) < 3:
+            continue  # 樣本太少，無從判斷誰是離群
+        med = vals[len(vals) // 2]
+        for yr, v in list(ymap.items()):
+            if not isinstance(v, (int, float)) or v <= 0 or 0.2 < v / med < 5:
+                continue  # 同數量級，正常
+            best = min(_SNAP_FACTORS, key=lambda f: abs(v * f - med))
+            if best != 1:
+                ymap[yr] = round(v * best, 2)
+                corrections.append({"指標": metric, "年": yr, "原換算值": v, "校正後": ymap[yr],
+                                    "依據": "跨年偏離中位數約10x", "中位數": med})
+
+    def _col(keys):  # 第一個名稱符合的指標的 {年: 數值}（用已修正後的值）
         for metric, ymap in metrics.items():
             if any(k in metric.lower() for k in keys):
                 return {yr: v for yr, v in (ymap or {}).items() if isinstance(v, (int, float))}
@@ -1473,7 +1494,7 @@ def _sanity_fix_amounts(norm: dict, resp: AgentResponse) -> dict:
     revenue = _col(_ROLE_REVENUE)
     net_income = _col(_NET_INCOME_KEYS)
 
-    corrections = []
+    # ②③ 利益 > 營收 → 10x 校正；EPS 與淨利同量級 → null
     for metric, ymap in metrics.items():
         constrained = _role_of(metric) == "constrained"
         is_eps = any(k in metric.lower() for k in _EPS_KEYS)

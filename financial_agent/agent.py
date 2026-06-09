@@ -441,7 +441,6 @@ def _text_layer_markdown(page, plain_text: str) -> str:
     return "\n\n".join(c for _, c in items) if items else plain_text
 
 
-
 def _cache_path(pdf_path: str) -> str:
     return os.path.join(RUNTIME.cache_dir, f"{os.path.basename(pdf_path)}.md")
 

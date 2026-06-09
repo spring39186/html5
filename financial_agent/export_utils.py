@@ -49,6 +49,14 @@ def _count_turns(messages: List[Dict[str, Any]]) -> int:
     return sum(1 for m in messages if m.get("role") == "user")
 
 
+def _json_block(value) -> str:
+    """把任意值轉成可讀 JSON 字串（失敗回退 str），給 trace 區塊顯示用。"""
+    try:
+        return json.dumps(value, ensure_ascii=False, indent=2, default=str)
+    except Exception:  # noqa: BLE001
+        return str(value)
+
+
 def _fmt_trace_event(ev: dict) -> str:
     """把單一 trace 事件格式化成 markdown 一段。"""
     phase = ev.get("phase", "?")
@@ -84,17 +92,10 @@ def _fmt_trace_event(ev: dict) -> str:
     if ev.get("result_preview"):
         parts.append(f"  - 結果: {ev['result_preview']}")
     if ev.get("extracted"):
-        try:
-            _ex = json.dumps(ev["extracted"], ensure_ascii=False, indent=2, default=str)
-        except Exception:  # noqa: BLE001
-            _ex = str(ev["extracted"])
-        parts.append(f"  - 抽數結果（原始 → 換算後）:\n\n```json\n{_ex}\n```")
+        parts.append(f"  - 抽數結果（原始 → 換算後）:\n\n```json\n{_json_block(ev['extracted'])}\n```")
     if ev.get("corrections"):
-        try:
-            _c = json.dumps(ev["corrections"], ensure_ascii=False, indent=2, default=str)
-        except Exception:  # noqa: BLE001
-            _c = str(ev["corrections"])
-        parts.append(f"  - ⚠️ 健全性校正（利益 > 營收，多為 10x 單位錯）:\n\n```json\n{_c}\n```")
+        parts.append("  - ⚠️ 健全性校正（利益 > 營收，多為 10x 單位錯）:"
+                     f"\n\n```json\n{_json_block(ev['corrections'])}\n```")
     if ev.get("evidence_preview"):
         parts.append(f"  - 證據預覽（實際餵給抽數的內容）:\n\n```\n{ev['evidence_preview']}\n```")
     if ev.get("code"):

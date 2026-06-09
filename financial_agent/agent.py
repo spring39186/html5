@@ -1533,6 +1533,39 @@ def _extract_metrics(user_prompt: str, evidence_text: str, resp: AgentResponse) 
         return None
 
 
+def _charts_from_extracted(extracted: dict) -> List[dict]:
+    """用程式化抽數表（已驗證的 年度×指標）直接組 chart spec，不靠 synthesizer 的 JSON。
+    依單位分兩張圖：金額類一張、每股/比率類一張（量級差太大不混在一起）。
+    這樣 synthesis 的 JSON 成不成功都一定畫得出圖，且圖表數字＝驗證過的抽數值。"""
+    years = (extracted or {}).get("years") or []
+    metrics = (extracted or {}).get("metrics") or {}
+    if not years or not metrics:
+        return []
+
+    amount, ratio = {}, {}
+    for name, ymap in metrics.items():
+        if not isinstance(ymap, dict) or not any(
+                isinstance(ymap.get(y), (int, float)) for y in years):
+            continue  # 整列都沒有有效值就不畫
+        bucket = ratio if any(k in name.lower() for k in _PER_SHARE_OR_RATIO) else amount
+        bucket[name] = ymap
+
+    def _spec(title: str, group: dict, ctype: str) -> dict:
+        data = [{"year": y,
+                 **{name: (ymap.get(y) if isinstance(ymap.get(y), (int, float)) else None)
+                    for name, ymap in group.items()}}
+                for y in years]
+        return {"title": title, "chart_type": ctype,
+                "description": f"各年度{'、'.join(group)}", "data": data}
+
+    charts = []
+    if amount:
+        charts.append(_spec("金額類指標趨勢（百萬）", amount, "line"))
+    if ratio:
+        charts.append(_spec("每股／比率指標趨勢", ratio, "bar"))
+    return charts
+
+
 def _synthesize(user_prompt: str, plan: PlanningResult,
                 evidence: List[str], resp: AgentResponse,
                 want_viz: bool = True) -> dict:
@@ -1552,9 +1585,16 @@ def _synthesize(user_prompt: str, plan: PlanningResult,
         _progress("🔢 抽取各年度關鍵數據中…")
         extracted = _extract_metrics(user_prompt, evidence_text, resp)
 
-    viz_rule = ("使用者本次「有要求」視覺化，charts 可填入需要的圖表規格。"
-                if want_viz else
-                "使用者本次「沒有要求」視覺化，charts 一律給空陣列 []，只輸出文字報告（必要時可用表格）。")
+    # 圖表改由程式從抽數表生成（見下方）：有權威數據時就叫 synthesizer 別出圖，
+    # JSON 更單純、較不會解析失敗走 fallback。
+    if not want_viz:
+        viz_rule = ("使用者本次「沒有要求」視覺化，charts 一律給空陣列 []，"
+                    "只輸出文字報告（必要時可用表格）。")
+    elif extracted:
+        viz_rule = ("圖表由系統依『已抽取的權威數據』自動產生，charts 一律給空陣列 []；"
+                    "你只需專注寫好文字報告（必要時用 tables 表格）。")
+    else:
+        viz_rule = "使用者本次「有要求」視覺化，charts 可填入需要的圖表規格（附實際數據）。"
 
     extracted_block = ""
     if extracted:
@@ -1595,7 +1635,7 @@ def _synthesize(user_prompt: str, plan: PlanningResult,
                 used_model,
                 [{"role": "system", "content":
                   "你是財務分析師。根據以下證據，用繁體中文寫一份連貫的分析報告，只用證據中的真實數據，"
-                  "不要捏造，不需輸出 JSON。"},
+                  "不要捏造，不需輸出 JSON，也不要輸出任何圖表設定或程式碼（圖表由系統另外產生）。"},
                  {"role": "user", "content": user_block}],
                 temperature=0.2,
             )
@@ -1603,6 +1643,13 @@ def _synthesize(user_prompt: str, plan: PlanningResult,
             report = (f"⚠️ 整合階段逾時，無法完成報告（{e2}）。\n\n"
                       f"以下為收集到的原始證據摘要：\n\n{_preview(evidence_text, 3000)}")
         charts, tables = [], []
+
+    # 圖表一律改用程式化抽數表生成（不靠 synthesizer 的 JSON）：確保一定畫得出、
+    # 且數字＝驗證過的值；synthesis 走不走 fallback 都不影響出圖。
+    if want_viz and extracted:
+        prog_charts = _charts_from_extracted(extracted)
+        if prog_charts:
+            charts = prog_charts
 
     _trace(resp, "synthesis", model=used_model,
            duration_ms=round((time.perf_counter() - t0) * 1000, 1),

@@ -1437,6 +1437,11 @@ _FORECAST_RE = re.compile(
 # 每股/比率類指標：不做百萬換算，保留原值
 _PER_SHARE_OR_RATIO = ("eps", "每股", "盈餘", "盈利", "per share", "margin", "率", "比率", "%", "ratio")
 
+
+def _is_ratio_metric(name: str) -> bool:
+    """指標名是否屬「每股/比率」類（EPS、margin、率…）：這類不換算百萬、也不做跨年量級檢查。"""
+    return any(k in (name or "").lower() for k in _PER_SHARE_OR_RATIO)
+
 # 財務角色關鍵字（把模型自訂的指標名對應到角色，做恆等式健全性檢查）
 _ROLE_REVENUE = ("營收", "营收", "revenue", "net sales", "sales", "売上", "turnover")
 _NET_INCOME_KEYS = ("淨利", "净利", "net income", "net profit", "profit attributable",
@@ -1470,7 +1475,7 @@ def _sanity_fix_amounts(norm: dict, resp: AgentResponse) -> dict:
 
     # ① 跨年量級一致性：偏離中位數超過約 5 倍 → snap 回最接近中位數的 10 次方
     for metric, ymap in metrics.items():
-        if not isinstance(ymap, dict) or any(k in metric.lower() for k in _PER_SHARE_OR_RATIO):
+        if not isinstance(ymap, dict) or _is_ratio_metric(metric):
             continue  # 每股/比率不做跨年量級檢查（量級本就可能差很多）
         vals = sorted(v for v in ymap.values() if isinstance(v, (int, float)) and v > 0)
         if len(vals) < 3:
@@ -1524,7 +1529,7 @@ def _normalize_extracted(data: dict) -> dict:
     years = data.get("years") or []
     out = {"years": years, "unit": "百萬日圓（金額；EPS 為日圓，皆由程式換算）", "metrics": {}}
     for metric, yearmap in (data.get("metrics") or {}).items():
-        is_amount = not any(k in metric.lower() for k in _PER_SHARE_OR_RATIO)
+        is_amount = not _is_ratio_metric(metric)
         clean = {}
         for yr, val in (yearmap or {}).items():
             if not isinstance(val, dict):
@@ -1582,7 +1587,7 @@ def _charts_from_extracted(extracted: dict) -> List[dict]:
         if not isinstance(ymap, dict) or not any(
                 isinstance(ymap.get(y), (int, float)) for y in years):
             continue  # 整列都沒有有效值就不畫
-        bucket = ratio if any(k in name.lower() for k in _PER_SHARE_OR_RATIO) else amount
+        bucket = ratio if _is_ratio_metric(name) else amount
         bucket[name] = ymap
 
     def _spec(title: str, group: dict, ctype: str) -> dict:

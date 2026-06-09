@@ -1165,6 +1165,9 @@ SYNTHESIS_SYSTEM_PROMPT = """你是首席財務分析師（總結整合 agent）
 
 # 確定性解析管線要撈的標準財務指標（英文查詢；KB 已英文）
 _STD_METRIC_QUERIES = [
+    # 合併損益表整張表（含當期＋前期兩欄，一次補兩年）——放最前面，round-robin 優先納入
+    ("合併損益表 Consolidated income statement",
+     "consolidated statement of income revenue operating profit profit for the year"),
     ("營收 Revenue", "revenue net sales current fiscal year"),
     ("營業利益 Operating income", "operating income operating profit current fiscal year"),
     ("淨利 Net income", "profit attributable to owners of the parent net income current fiscal year"),
@@ -1206,7 +1209,7 @@ def _gather_files_deterministic(user_prompt: str, file_registry: dict,
         metric_hits = []
         for label, q in _STD_METRIC_QUERIES:
             try:
-                hits = _retrieve_hits(q, [], {"file_name": fn}, n_results=3)
+                hits = _retrieve_hits(q, [], {"file_name": fn}, n_results=6)
             except Exception:  # noqa: BLE001
                 hits = []
             metric_hits.append(hits)

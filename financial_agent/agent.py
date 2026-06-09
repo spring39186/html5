@@ -443,7 +443,8 @@ def _text_layer_markdown(page, plain_text: str) -> str:
 
 # 快取版本：抽取/正規化邏輯升級時 +1，舊版快取檔名不符 → 自動失效重跑，免手動清 ocr_cache。
 # v2：文字層改用 find_tables 還原表格 Markdown（取代舊的 get_text 亂序抽取）。
-_OCR_CACHE_VERSION = "2"   # OCR/表格抽取邏輯
+# v3：實測 find_tables 不穩、易漏數據 → 預設改回全頁 vision OCR，失效 v2 的表格快取。
+_OCR_CACHE_VERSION = "3"   # OCR/表格抽取邏輯
 _NORM_CACHE_VERSION = "1"  # 英文正規化邏輯（OCR 版本變動會連帶讓 .en 失效，不必重複 +1）
 
 

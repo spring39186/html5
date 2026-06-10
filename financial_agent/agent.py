@@ -140,6 +140,7 @@ class AgentResponse:
     plotly_jsons: List[str] = field(default_factory=list)  # 互動式 Plotly 圖（FA_PLOTLY 開啟時）
     trace: List[dict] = field(default_factory=list)  # 完整執行軌跡（供下載/優化）
     csv_cache_path: str = ""  # 本輪 Teradata 撈出的大數據落地 CSV 路徑（前端解鎖樞紐/網格）
+    db_row_count: str = ""  # 本輪 DB 查詢撈出的筆數（供精簡回覆用，於收集時就地擷取）
 
 
 def _now_iso() -> str:
@@ -1495,16 +1496,21 @@ def _gather_evidence(plan: PlanningResult, user_prompt: str,
                 resp.executed_sql.append(args["sql"])
 
             result_str = str(result)
+            # run_sql_query 把 CSV 快取路徑藏在結果尾端（out-of-band metadata）。就地攔下寫進
+            # resp（前端據此解鎖 AgGrid/PivotTableJS 樞紐 Tab），並把標記從結果移除——免得它被
+            # _preview 截斷而遺失，也不讓總結模型看到實體路徑。
+            if _CSV_CACHE_MARKER in result_str:
+                head, _, path = result_str.partition(_CSV_CACHE_MARKER)
+                if path.strip() and not resp.csv_cache_path:
+                    resp.csv_cache_path = path.strip()
+                    m_rows = re.search(r"撈取\s*([\d,]+)\s*筆", head)
+                    resp.db_row_count = m_rows.group(1) if m_rows else ""
+                result_str = head.rstrip()
+
             # 解析類訊息（如「已完成解析」）不算證據，檢索/SQL 結果才收進證據
             if func_name in ("search_knowledge_base", "run_sql_query") or "查詢成功" in result_str:
-                body = _preview(result_str, 2500)
-                # run_sql_query 把 CSV 快取路徑標記放在結果「尾端」，_preview 截斷會把它切掉，
-                # 導致 _execute_tool_loop 掃不到 marker → 前端拿不到 csv_cache_path
-                # → AgGrid/PivotTableJS 的樞紐 Tab 無法解鎖。截斷後務必把 marker 補回。
-                if _CSV_CACHE_MARKER in result_str and _CSV_CACHE_MARKER not in body:
-                    body += "\n" + result_str[result_str.index(_CSV_CACHE_MARKER):]
                 evidence.append(f"【{func_name}｜{args.get('search_query') or args.get('sql') or ''}】\n"
-                                f"{body}")
+                                f"{_preview(result_str, 2500)}")
 
             _trace(resp, "tool_call", step=step, tool=func_name,
                    thought=args.get("thought_process"),
@@ -1940,22 +1946,10 @@ def _present_synthesis(synthesis: dict, resp: AgentResponse,
     _trace(resp, "present", tables=len(resp.tables), images=len(resp.images))
 
 
-def _extract_csv_cache(evidence: List[str], resp: AgentResponse) -> None:
-    """從證據裡攔出隱藏的實體 CSV 快取路徑寫進 resp.csv_cache_path（前端據此解鎖
-    AgGrid/PivotTableJS 樞紐 Tab），並把標記從證據移除（總結模型不該看到）。
-    tool-loop 與 graph 兩條路徑共用，避免其中一條漏接導致樞紐表出不來。"""
-    for i, ev in enumerate(evidence):
-        if _CSV_CACHE_MARKER in ev:
-            head, _, path = ev.partition(_CSV_CACHE_MARKER)
-            resp.csv_cache_path = path.strip()
-            evidence[i] = head.rstrip()
-
-
-def _db_pivot_report(resp: AgentResponse, evidence: List[str]) -> str:
+def _db_pivot_report(resp: AgentResponse) -> str:
     """資料庫查詢的精簡回覆：報告撈取筆數 + SQL，並把使用者導去前端互動樞紐/網格。
     完整明細交給 AgGrid/PivotTableJS（資料隔離），不在文字報告裡重述或捏造數據。"""
-    m = re.search(r"撈取\s*([\d,]+)\s*筆", "\n".join(evidence))
-    n = m.group(1) if m else "多"
+    n = resp.db_row_count or "多"
     sql_note = ""
     if resp.executed_sql:
         sql_note = f"\n\n查詢 SQL：\n```sql\n{resp.executed_sql[-1].strip()}\n```"
@@ -1972,19 +1966,17 @@ def _execute_tool_loop(plan: PlanningResult, user_prompt: str,
                        file_registry: dict, resp: AgentResponse) -> None:
     """統籌三階段：收集 → 整合 → 視覺化/表格 → 一起呈現。"""
     _progress("📂 解析檔案、收集證據中…")
+    # gather 會在收集時就地把 DB 大數據 CSV 快取路徑寫進 resp.csv_cache_path（前端解鎖樞紐 Tab）
     evidence = gather(plan, user_prompt, file_registry, resp)
-
-    # 數據隔離：從證據裡攔出隱藏的實體 CSV 快取路徑（前端據此解鎖樞紐 Tab）
-    _extract_csv_cache(evidence, resp)
 
     # 資料庫查詢且資料已落地：完整明細由前端 AgGrid/PivotTableJS 互動呈現，
     # 不該讓總結模型拿 30 筆預覽去「捏造」一張樞紐表（會誤導、又白花 20 多秒）。
     # 直接給精簡導引，把使用者帶去 Tab 3 自己拖拉樞紐。
     if plan.intent == IntentType.DATABASE_QUERY and resp.csv_cache_path:
-        resp.report_text = _db_pivot_report(resp, evidence)
+        report = _db_pivot_report(resp)
         _trace(resp, "synthesis", model="(skipped: db_pivot)",
-               report_text=_preview(resp.report_text, 500), chart_count=0, table_count=0)
-        _present_synthesis({"report": resp.report_text, "charts": [], "tables": []},
+               report_text=_preview(report, 500), chart_count=0, table_count=0)
+        _present_synthesis({"report": report, "charts": [], "tables": []},
                            resp, file_registry, want_viz=False)
         return
 

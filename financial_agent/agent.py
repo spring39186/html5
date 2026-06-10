@@ -55,7 +55,12 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 import chromadb
 
 from config import MODEL_CONFIG, RUNTIME
+import mock_db
 import units
+
+import urllib.parse
+import httpx
+import pyodbc
 
 # ============================================================
 # 初始化
@@ -74,7 +79,6 @@ collection = chroma_client.get_or_create_collection(
 )
 
 os.makedirs(RUNTIME.cache_dir, exist_ok=True)
-
 
 def clear_knowledge_base() -> int:
     """清空整個向量知識庫（刪掉所有已入庫 chunk），回傳刪除的區塊數。
@@ -793,36 +797,95 @@ def _db_csv_path() -> str:
 def get_database_schema(args: dict, file_registry: dict) -> str:
     """回傳真實 Teradata 資料庫（Essbase 多維寬表）的結構說明，
     引導 Planner 生成正確 SQL、Coder 寫出極簡的 Pandas 樞紐腳本。"""
-    print("🗂️ [DB Schema] 提供 Teradata (HDATA) 資料庫結構說明")
+    print("🗂️ [DB Schema] 提供 Teradata 資料庫結構與業務簡介說明")
+    print("🗂️ [DB Schema] 動態載入資料字典與業務簡介")
+    
+    # 1. 讀取外部 JSON 資料字典
+    catalog_path = "table_catalog.json"
+    table_list_prompt = ""
+    
+    if os.path.exists(catalog_path):
+        with open(catalog_path, "r", encoding="utf-8") as f:
+            catalog = json.load(f)
+            # 動態組裝 Prompt 字串
+            for table_name, meta in catalog.items():
+                table_list_prompt += f"- 目標資料表：`{table_name}`\n"
+                table_list_prompt += f"  - 業務定義：【{meta['alias']}】\n"
+                table_list_prompt += f"  - 適用情境：{meta['description']}\n\n"
+    else:
+        table_list_prompt = "⚠️ 找不到 table_catalog.json 設定檔。"
+
+    # 2. 將動態組裝好的清單塞入 Master Prompt
     return f"""
-【Teradata 財務資料庫結構說明】
-目前可用目標資料表：{RUNTIME.td_table}
-這是一張已完成 Reporting-ready（報表化）的多維度寬表，欄位符合 Essbase 多維 OLAP 結構：
+        【Teradata 財務資料庫結構與業務定義說明】
 
-- PARENT_SITE_ORG (VARCHAR): 父節點組織層級。
-- CHILD_SITE_ORG (VARCHAR): 子節點組織層級。
-- SCTR_MBR_NM (VARCHAR): 業務科目名稱，含完整層級路徑字串，
-  例如 `[Site Org].[OtherH_Group].[IC_ATM_T].[M_Group Total-Consol]`，
-  可用 `.str.split('.')` 拆解多層級建立 MultiIndex。
-- SCENARIO (VARCHAR): 業務情境，例如 `Actual`(實績) 或 `Budget`(預算)。
-- YEAR_MON (VARCHAR): 時間維度，格式 `YYYYMM`（如 202508），適合做樞紐 Columns 展開。
-- AMT (DECIMAL): 財務數據金額。
+        📊 [可用資料表清單與業務簡介]
+        目前系統開放以下目標資料表供查詢。請根據使用者的分析需求，選擇最合適的表：
+        {table_list_prompt}
 
-【AI 產出樞紐表/繪圖腳本硬性指示】
-1. 使用者要樞紐/統計/視覺化時，產生查詢 `{RUNTIME.td_table}` 的 SQL。
-2. 下一步呼叫 run_python_code 時，指示 Coder「直接讀快取 CSV」：
-   df = pd.read_csv(r'{_db_csv_path()}')
-3. 基於 Essbase 結構，Pandas 應極簡：
-   pivot_df = df.pivot_table(index=['PARENT_SITE_ORG','CHILD_SITE_ORG','SCTR_MBR_NM'],
-                             columns=['SCENARIO','YEAR_MON'], values='AMT', aggfunc='sum')
-"""
+        以上資料已完成 Reporting-ready（報表化）的多維度寬表，欄位符合 Essbase 多維 OLAP 結構：
+
+        💡 【系統強制過濾與限制提示】
+        1. 系統底層已實施嚴格資料治理，會在 SQL 結尾自動附加 `< CAST(SUBSTR(YEAR_MON, 1, 4) AS INTEGER) < 2015` 的年份條件，如果你有條件則用 AND 補上。
+        2. 🚫 嚴禁寫出 `GROUP BY` 或 `ORDER BY`，否則會導致底層字串串接語法錯誤！
+        3. 🚫 嚴禁探測 Schema：你已經知道欄位結構了，絕對不可以寫出 `WHERE 1=0` 這種探測語法。
+
+        【Essbase 多維 OLAP 欄位定義】
+        - PARENT_SITE_ORG (VARCHAR): 父組織。範例: `[Site Group].[Group]`
+        - CHILD_SITE_ORG (VARCHAR): 子組織 (含層級路徑)。範例: `[Site Org].[OtherH_Group].[IC_ATM_T].[M_Group Total-Consol]`
+        - SCTR_MBR_NM (VARCHAR): 業務科目。範例: `BGA NTD K`, `AsLogic NTD K`
+        - CURC (VARCHAR): 幣別。範例: `NTD`, `USD`
+        - YEAR_MON (VARCHAR): 時間維度，格式為 `YYYY_Mon`。範例: `2010_Jun`, `2011_May`
+        - SCENARIO (VARCHAR): 業務情境。範例: `ForecastV2`, `Actual`
+        - AMT (DECIMAL): 金額。範例: `222`, `22`
+
+        【AI 執行樞紐分析與報表之硬性指示】
+        1. 💡 系統前端已內建強大的 PivotTableJS 與 AgGrid 視覺化套件。
+        2. 當使用者要求「樞紐分析」、「視覺化」或「看數據明細」時，你的**唯一任務**就是：產生精準的 SELECT SQL 並呼叫 `run_sql_query` 工具。
+        3. 🚨 嚴禁呼叫 Python 工具：執行完 SQL 後，底層會自動建立 CSV 快取並交給前端 PivotTableJS 渲染。你「絕對不需要」呼叫 `run_python_code` 來寫 Pandas 腳本！
+        4. 只要回覆使用者：「已為您撈取歷史資料，請切換至上方的『自由拖拉樞紐分析』頁籤（Tab 3）進行探索。」即可。
+        """
 
 
 def run_sql_query(args: dict, file_registry: dict) -> str:
     """執行模型生成的 SELECT（唯讀）於 Teradata：pyodbc 連線、Big5 解碼防禦、pd.read_sql，
     完整大數據落地為 utf-8-sig CSV（數據隔離），只回前 30 筆 Markdown 預覽 + 快取路徑標記。"""
-    sql = args.get("sql", "")
-    print(f"📊 [Teradata SQL] {sql[:160]}")
+    raw_sql = args.get("sql", "")
+
+    # ==============================================================
+    # 🛡️ 智能 SQL 字串注入 (Smart SQL Injection)
+    # 條件：強制年份必須小於 2015
+    # ==============================================================
+    enforce_cond = "CAST(SUBSTR(YEAR_MON, 1, 4) AS INTEGER) < 2015"
+    
+    # 使用 \b 確保精準匹配獨立的 WHERE 單字（忽略大小寫）
+    if re.search(r'\bWHERE\b', raw_sql, re.IGNORECASE):
+        # 【情境 A：有 WHERE】
+        # 把第一個 WHERE 替換成 "WHERE 強制條件 AND "
+        # 例如: WHERE SCENARIO = 'Actual' -> WHERE (強制條件) AND SCENARIO = 'Actual'
+        safe_sql = re.sub(
+            r'\bWHERE\b', 
+            f"WHERE {enforce_cond} AND ", 
+            raw_sql, 
+            count=1, 
+            flags=re.IGNORECASE
+        )
+    else:
+        # 【情境 B：沒有 WHERE】
+        # 必須檢查有沒有 GROUP BY 或 ORDER BY，有的話要插在它們「前面」
+        match = re.search(r'\b(GROUP BY|ORDER BY)\b', raw_sql, re.IGNORECASE)
+        if match:
+            # 找到 GROUP BY 或 ORDER BY 的起始位置，把 WHERE 插進去
+            insert_pos = match.start()
+            safe_sql = f"{raw_sql[:insert_pos]} WHERE {enforce_cond} {raw_sql[insert_pos:]}"
+        else:
+            # 如果什麼都沒有，就直接加在最後面
+            safe_sql = f"{raw_sql} WHERE {enforce_cond}"
+            
+    # 最後把分號補回來
+    safe_sql += ";"
+
+    print(f"📊 [Teradata SQL] {safe_sql}")
 
     if not RUNTIME.td_configured:
         return ("❌ Teradata 連線未設定。請在 .env 設定 FA_TD_DBCNAME / FA_TD_UID / FA_TD_PWD "
@@ -848,7 +911,7 @@ def run_sql_query(args: dict, file_registry: dict) -> str:
             conn.setdecoding(pyodbc.SQL_WCHAR, encoding=RUNTIME.td_encoding)
         except Exception:  # noqa: BLE001
             pass
-        df = pd.read_sql(sql, conn)
+        df = pd.read_sql(safe_sql, conn)
     except Exception as e:  # noqa: BLE001
         return f"❌ Teradata 資料庫 SQL 執行失敗，錯誤訊息：\n{e}"
     finally:

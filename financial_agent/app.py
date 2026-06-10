@@ -5,6 +5,7 @@ AI 財務智能審計與知識庫系統 - Streamlit 前端
 """
 
 import os
+import re
 from datetime import datetime
 
 import streamlit as st
@@ -180,8 +181,14 @@ def _render_essbase_aggrid(df: pd.DataFrame):
     gob.configure_side_bar()
     gob.configure_default_column(groupable=True, value=True, enableRowGroup=True,
                                  filter=True, sortable=True)
-    # ⚡ 針對 Essbase 組織層級，預設啟用群組樹狀
-    if "PARENT_SITE_ORG" in df.columns and "CHILD_SITE_ORG" in df.columns:
+    # ⚡ Essbase 組織層級樹狀群組：優先用後端展開好的 ORG_L1..Ln 逐層下鑽；
+    # 沒有（舊資料）才退回用原始 PARENT/CHILD 整串路徑分組。
+    org_levels = sorted((c for c in df.columns if re.fullmatch(r"ORG_L\d+", c)),
+                        key=lambda c: int(c[5:]))
+    if org_levels:
+        for col in org_levels:
+            gob.configure_column(col, rowGroup=True, hide=True)
+    elif "PARENT_SITE_ORG" in df.columns and "CHILD_SITE_ORG" in df.columns:
         gob.configure_column("PARENT_SITE_ORG", rowGroup=True, hide=True)
         gob.configure_column("CHILD_SITE_ORG", rowGroup=True, hide=True)
     AgGrid(df, gridOptions=gob.build(),

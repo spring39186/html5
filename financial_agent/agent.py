@@ -928,7 +928,10 @@ def run_sql_query(args: dict, file_registry: dict) -> str:
     # 數據隔離核心：完整數據落地本地快取，杜絕 Token 爆炸與 AI 幻覺
     os.makedirs(RUNTIME.cache_dir, exist_ok=True)
     csv_path = _db_csv_path()
-    df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    # Essbase 長表 → 樞紐友善結構：把階層/時間/幣別等複合字串拆成正規維度欄
+    # （ORG_L1.., YEAR/MONTH/MONTH_NO, CURRENCY/UNIT），前端才能真正多維下鑽與正確排序。
+    from essbase import to_pivot_ready
+    to_pivot_ready(df).to_csv(csv_path, index=False, encoding="utf-8-sig")
     print(f"   └─ {len(df)} 筆 → 落地 {csv_path}")
 
     try:

@@ -154,7 +154,9 @@ def _pivot_html(csv_path: str, mtime: float) -> str:
     df = _load_db_csv(csv_path, mtime)
     tmp = os.path.join("temp_dir", f"_pivot_{abs(hash((csv_path, mtime)))}.html")
     os.makedirs("temp_dir", exist_ok=True)
-    pivot_ui(df, outfile=tmp)
+    # 注意：pivottablejs.pivot_ui 的輸出參數叫 outfile_path（不是 outfile）。
+    # 傳錯名會被 **kwargs 吃掉、實際寫到預設的 pivottablejs.html，導致下方 open(tmp) 找不到檔。
+    pivot_ui(df, outfile_path=tmp)
     try:
         with open(tmp, "r", encoding="utf-8") as f:
             return f.read()

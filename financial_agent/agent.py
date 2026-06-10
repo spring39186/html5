@@ -1497,8 +1497,14 @@ def _gather_evidence(plan: PlanningResult, user_prompt: str,
             result_str = str(result)
             # 解析類訊息（如「已完成解析」）不算證據，檢索/SQL 結果才收進證據
             if func_name in ("search_knowledge_base", "run_sql_query") or "查詢成功" in result_str:
+                body = _preview(result_str, 2500)
+                # run_sql_query 把 CSV 快取路徑標記放在結果「尾端」，_preview 截斷會把它切掉，
+                # 導致 _execute_tool_loop 掃不到 marker → 前端拿不到 csv_cache_path
+                # → AgGrid/PivotTableJS 的樞紐 Tab 無法解鎖。截斷後務必把 marker 補回。
+                if _CSV_CACHE_MARKER in result_str and _CSV_CACHE_MARKER not in body:
+                    body += "\n" + result_str[result_str.index(_CSV_CACHE_MARKER):]
                 evidence.append(f"【{func_name}｜{args.get('search_query') or args.get('sql') or ''}】\n"
-                                f"{_preview(result_str, 2500)}")
+                                f"{body}")
 
             _trace(resp, "tool_call", step=step, tool=func_name,
                    thought=args.get("thought_process"),
@@ -1934,18 +1940,53 @@ def _present_synthesis(synthesis: dict, resp: AgentResponse,
     _trace(resp, "present", tables=len(resp.tables), images=len(resp.images))
 
 
+def _extract_csv_cache(evidence: List[str], resp: AgentResponse) -> None:
+    """從證據裡攔出隱藏的實體 CSV 快取路徑寫進 resp.csv_cache_path（前端據此解鎖
+    AgGrid/PivotTableJS 樞紐 Tab），並把標記從證據移除（總結模型不該看到）。
+    tool-loop 與 graph 兩條路徑共用，避免其中一條漏接導致樞紐表出不來。"""
+    for i, ev in enumerate(evidence):
+        if _CSV_CACHE_MARKER in ev:
+            head, _, path = ev.partition(_CSV_CACHE_MARKER)
+            resp.csv_cache_path = path.strip()
+            evidence[i] = head.rstrip()
+
+
+def _db_pivot_report(resp: AgentResponse, evidence: List[str]) -> str:
+    """資料庫查詢的精簡回覆：報告撈取筆數 + SQL，並把使用者導去前端互動樞紐/網格。
+    完整明細交給 AgGrid/PivotTableJS（資料隔離），不在文字報告裡重述或捏造數據。"""
+    m = re.search(r"撈取\s*([\d,]+)\s*筆", "\n".join(evidence))
+    n = m.group(1) if m else "多"
+    sql_note = ""
+    if resp.executed_sql:
+        sql_note = f"\n\n查詢 SQL：\n```sql\n{resp.executed_sql[-1].strip()}\n```"
+    return (
+        f"✅ 已為您從資料庫撈取 **{n} 筆** 明細資料並完成本地快取。\n\n"
+        f"請切換至上方的 **🔀『自由拖拉樞紐分析 (Excel UI)』頁籤（Tab 3）** 進行探索"
+        f"（建議：列＝組織、欄＝月份 `YEAR_MON`、值＝`AMT` 加總、篩選＝`SCENARIO`／`CURC`）；"
+        f"或切到 **🗂️『企業級數據網格 (AgGrid)』** 檢視完整明細與組織層級群組。"
+        f"{sql_note}"
+    )
+
+
 def _execute_tool_loop(plan: PlanningResult, user_prompt: str,
                        file_registry: dict, resp: AgentResponse) -> None:
     """統籌三階段：收集 → 整合 → 視覺化/表格 → 一起呈現。"""
     _progress("📂 解析檔案、收集證據中…")
     evidence = gather(plan, user_prompt, file_registry, resp)
 
-    # 數據隔離：從證據裡攔出隱藏的實體 CSV 快取路徑，並把標記從證據移除（總結模型不該看到）
-    for i, ev in enumerate(evidence):
-        if _CSV_CACHE_MARKER in ev:
-            head, _, path = ev.partition(_CSV_CACHE_MARKER)
-            resp.csv_cache_path = path.strip()
-            evidence[i] = head.rstrip()
+    # 數據隔離：從證據裡攔出隱藏的實體 CSV 快取路徑（前端據此解鎖樞紐 Tab）
+    _extract_csv_cache(evidence, resp)
+
+    # 資料庫查詢且資料已落地：完整明細由前端 AgGrid/PivotTableJS 互動呈現，
+    # 不該讓總結模型拿 30 筆預覽去「捏造」一張樞紐表（會誤導、又白花 20 多秒）。
+    # 直接給精簡導引，把使用者帶去 Tab 3 自己拖拉樞紐。
+    if plan.intent == IntentType.DATABASE_QUERY and resp.csv_cache_path:
+        resp.report_text = _db_pivot_report(resp, evidence)
+        _trace(resp, "synthesis", model="(skipped: db_pivot)",
+               report_text=_preview(resp.report_text, 500), chart_count=0, table_count=0)
+        _present_synthesis({"report": resp.report_text, "charts": [], "tables": []},
+                           resp, file_registry, want_viz=False)
+        return
 
     print("\n  🧩 [Synthesize] 總結 agent 整合證據...")
     _progress("🧩 整合分析、撰寫報告中…（這步較久，請稍候）")

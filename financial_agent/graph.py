@@ -120,6 +120,8 @@ def _gather(state: AgentState) -> dict:
     resp = state["_resp"]
     evidence = agent.gather(state["_plan"], state["user_query"],
                             state.get("file_registry") or {}, resp)
+    # 與 tool-loop 路徑一致：攔出 DB 大數據 CSV 快取路徑，前端才能解鎖樞紐/網格 Tab
+    agent._extract_csv_cache(evidence, resp)
     return {"_resp": resp, "evidence": evidence}
 
 

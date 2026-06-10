@@ -1,0 +1,6 @@
+{
+    "HMART.VW_FCT_SAL_RPT_HC": {
+      "alias": "Sales Report 草稿報表",
+      "description": "當使用者詢問「銷售額」、「業績」、「各組織層級的 Sales 分析」或要求產出銷售樞紐分析表時，請一律查詢此表。"
+    } 
+  }

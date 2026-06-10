@@ -110,6 +110,21 @@ class RuntimeConfig:
     # 想省成本再設 FA_LAZY_OCR=1。
     lazy_ocr: bool = os.getenv("FA_LAZY_OCR", "0").strip().lower() in ("1", "true", "yes", "on")
 
+    # ── Teradata（DB 查詢）連線：機密一律放 .env 或真實環境變數，勿寫進程式碼 ──
+    td_driver: str = os.getenv("FA_TD_DRIVER", "Teradata Database ODBC Driver 17.20")
+    td_dbcname: str = os.getenv("FA_TD_DBCNAME", "")   # 伺服器位址；空 → 視為未設定
+    td_uid: str = os.getenv("FA_TD_UID", "")
+    td_pwd: str = os.getenv("FA_TD_PWD", "")
+    td_table: str = os.getenv("FA_TD_TABLE", "HDATA.SAL_DRAFT_RPT_HC")
+    td_authentication: str = os.getenv("FA_TD_AUTH", "SYSTEM")
+    td_tmode: str = os.getenv("FA_TD_TMODE", "TERA")
+    td_encoding: str = os.getenv("FA_TD_ENCODING", "big5")  # Big5 解碼防亂碼
+
+    @property
+    def td_configured(self) -> bool:
+        """連線三要素都有才算設定完成（否則 run_sql_query 直接回明確錯誤、不亂連）。"""
+        return bool(self.td_dbcname and self.td_uid and self.td_pwd)
+
 
 MODEL_CONFIG = ModelConfig()
 RUNTIME = RuntimeConfig()

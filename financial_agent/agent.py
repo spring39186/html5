@@ -55,7 +55,6 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 import chromadb
 
 from config import MODEL_CONFIG, RUNTIME
-import mock_db
 import units
 
 # ============================================================
@@ -136,6 +135,7 @@ class AgentResponse:
     executed_sql: List[str] = field(default_factory=list)  # 本輪實際執行的 SQL（供對話記憶）
     plotly_jsons: List[str] = field(default_factory=list)  # 互動式 Plotly 圖（FA_PLOTLY 開啟時）
     trace: List[dict] = field(default_factory=list)  # 完整執行軌跡（供下載/優化）
+    csv_cache_path: str = ""  # 本輪 Teradata 撈出的大數據落地 CSV 路徑（前端解鎖樞紐/網格）
 
 
 def _now_iso() -> str:
@@ -782,22 +782,105 @@ def _retrieve_and_format(eng_query: str, expanded: List[str],
             f"{context}\n\n請只根據以上原文回答，禁止捏造。")
 
 
+# 數據隔離管線：大數據落地的 CSV 路徑 + 埋在工具回傳末端的特殊標記（供外層攔截）
+_CSV_CACHE_MARKER = "__CSV_CACHE_PATH__:"
+
+
+def _db_csv_path() -> str:
+    return os.path.join(RUNTIME.cache_dir, "db_query_result.csv")
+
+
 def get_database_schema(args: dict, file_registry: dict) -> str:
-    """回傳 mock MSSQL 資料庫的結構說明，讓模型知道能查什麼、欄位怎麼拼。"""
-    print("🗂️ [DB Schema] 提供資料庫結構說明")
-    return mock_db.get_schema()
+    """回傳真實 Teradata 資料庫（Essbase 多維寬表）的結構說明，
+    引導 Planner 生成正確 SQL、Coder 寫出極簡的 Pandas 樞紐腳本。"""
+    print("🗂️ [DB Schema] 提供 Teradata (HDATA) 資料庫結構說明")
+    return f"""
+【Teradata 財務資料庫結構說明】
+目前可用目標資料表：{RUNTIME.td_table}
+這是一張已完成 Reporting-ready（報表化）的多維度寬表，欄位符合 Essbase 多維 OLAP 結構：
+
+- PARENT_SITE_ORG (VARCHAR): 父節點組織層級。
+- CHILD_SITE_ORG (VARCHAR): 子節點組織層級。
+- SCTR_MBR_NM (VARCHAR): 業務科目名稱，含完整層級路徑字串，
+  例如 `[Site Org].[OtherH_Group].[IC_ATM_T].[M_Group Total-Consol]`，
+  可用 `.str.split('.')` 拆解多層級建立 MultiIndex。
+- SCENARIO (VARCHAR): 業務情境，例如 `Actual`(實績) 或 `Budget`(預算)。
+- YEAR_MON (VARCHAR): 時間維度，格式 `YYYYMM`（如 202508），適合做樞紐 Columns 展開。
+- AMT (DECIMAL): 財務數據金額。
+
+【AI 產出樞紐表/繪圖腳本硬性指示】
+1. 使用者要樞紐/統計/視覺化時，產生查詢 `{RUNTIME.td_table}` 的 SQL。
+2. 下一步呼叫 run_python_code 時，指示 Coder「直接讀快取 CSV」：
+   df = pd.read_csv(r'{_db_csv_path()}')
+3. 基於 Essbase 結構，Pandas 應極簡：
+   pivot_df = df.pivot_table(index=['PARENT_SITE_ORG','CHILD_SITE_ORG','SCTR_MBR_NM'],
+                             columns=['SCENARIO','YEAR_MON'], values='AMT', aggfunc='sum')
+"""
 
 
 def run_sql_query(args: dict, file_registry: dict) -> str:
-    """執行模型生成的 SQL（唯讀）於 mock MSSQL 模擬器，回傳假資料。"""
+    """執行模型生成的 SELECT（唯讀）於 Teradata：pyodbc 連線、Big5 解碼防禦、pd.read_sql，
+    完整大數據落地為 utf-8-sig CSV（數據隔離），只回前 30 筆 Markdown 預覽 + 快取路徑標記。"""
     sql = args.get("sql", "")
-    print(f"📊 [SQL] {sql[:160]}")
-    result = mock_db.execute_sql(sql)
-    if result.get("ok"):
-        print(f"   └─ {result['rowcount']} 筆 | 實際執行: {result.get('translated_sql', '')[:120]}")
-    else:
-        print(f"   └─ ❌ {result.get('error')}")
-    return mock_db.format_result(result)
+    print(f"📊 [Teradata SQL] {sql[:160]}")
+
+    if not RUNTIME.td_configured:
+        return ("❌ Teradata 連線未設定。請在 .env 設定 FA_TD_DBCNAME / FA_TD_UID / FA_TD_PWD "
+                "（伺服器、帳號、密碼）後再查詢。")
+    try:
+        import pyodbc  # 延遲載入：企業環境才有此驅動，開發機可不裝
+    except ImportError:
+        return "❌ 找不到 pyodbc 套件（pip install pyodbc，並安裝 Teradata ODBC 驅動）。"
+
+    conn_str = (
+        f"DRIVER={{{RUNTIME.td_driver}}};"
+        f"DBCNAME={RUNTIME.td_dbcname};"
+        f"UID={RUNTIME.td_uid};"
+        "PWD={" + RUNTIME.td_pwd + "};"
+        f"Authentication={RUNTIME.td_authentication};"
+        f"TMODE={RUNTIME.td_tmode};"
+    )
+    conn = None
+    try:
+        conn = pyodbc.connect(conn_str, autocommit=True)
+        try:  # Big5 解碼防禦：防亂碼與 "not type" 錯誤；驅動不支援就跳過
+            conn.setdecoding(pyodbc.SQL_CHAR, encoding=RUNTIME.td_encoding)
+            conn.setdecoding(pyodbc.SQL_WCHAR, encoding=RUNTIME.td_encoding)
+        except Exception:  # noqa: BLE001
+            pass
+        df = pd.read_sql(sql, conn)
+    except Exception as e:  # noqa: BLE001
+        return f"❌ Teradata 資料庫 SQL 執行失敗，錯誤訊息：\n{e}"
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    if df.empty:
+        return "✅ Teradata 查詢成功執行，但該條件下資料庫無符合的紀錄。"
+
+    # 數據隔離核心：完整數據落地本地快取，杜絕 Token 爆炸與 AI 幻覺
+    os.makedirs(RUNTIME.cache_dir, exist_ok=True)
+    csv_path = _db_csv_path()
+    df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    print(f"   └─ {len(df)} 筆 → 落地 {csv_path}")
+
+    try:
+        preview_md = df.head(30).to_markdown(index=False)
+    except Exception:  # noqa: BLE001  缺 tabulate 時退回純文字
+        preview_md = df.head(30).to_string(index=False)
+
+    return (
+        f"✅ Teradata 查詢成功！共從 `{RUNTIME.td_table}` 撈取 {len(df)} 筆明細資料。\n\n"
+        f"【資料庫結果預覽（前 30 筆）】\n{preview_md}\n\n"
+        f"💡 [系統管線指令]：完整大數據集已安全暫存於本地快取：'{csv_path}'。\n"
+        f"後續若需 run_python_code 產生樞紐表或繪圖，請命令 Coder 直接讀此檔分析：\n"
+        f"```python\nimport pandas as pd\ndf = pd.read_csv(r'{csv_path}')\n```\n"
+        f"嚴禁模型自行硬編碼或虛構數據。\n\n"
+        f"{_CSV_CACHE_MARKER}{csv_path}"
+    )
 
 
 def generate_financial_table(args: dict, file_registry: dict) -> str:
@@ -1793,6 +1876,14 @@ def _execute_tool_loop(plan: PlanningResult, user_prompt: str,
     """統籌三階段：收集 → 整合 → 視覺化/表格 → 一起呈現。"""
     _progress("📂 解析檔案、收集證據中…")
     evidence = gather(plan, user_prompt, file_registry, resp)
+
+    # 數據隔離：從證據裡攔出隱藏的實體 CSV 快取路徑，並把標記從證據移除（總結模型不該看到）
+    for i, ev in enumerate(evidence):
+        if _CSV_CACHE_MARKER in ev:
+            head, _, path = ev.partition(_CSV_CACHE_MARKER)
+            resp.csv_cache_path = path.strip()
+            evidence[i] = head.rstrip()
+
     print("\n  🧩 [Synthesize] 總結 agent 整合證據...")
     _progress("🧩 整合分析、撰寫報告中…（這步較久，請稍候）")
     want_viz = _wants_visualization(user_prompt, plan)
@@ -1825,6 +1916,7 @@ def _build_result(resp: AgentResponse) -> dict:
         "route": resp.route,
         "executed_sql": resp.executed_sql,
         "trace": resp.trace,
+        "csv_cache_path": resp.csv_cache_path,
     }
 
 

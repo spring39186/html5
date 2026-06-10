@@ -836,7 +836,7 @@ def run_sql_query(args: dict, file_registry: dict) -> str:
         f"DRIVER={{{RUNTIME.td_driver}}};"
         f"DBCNAME={RUNTIME.td_dbcname};"
         f"UID={RUNTIME.td_uid};"
-        "PWD={" + RUNTIME.td_pwd + "};"
+        f"PWD={{{RUNTIME.td_pwd}}};"  # 大括號包密碼，避免特殊字元破壞連線字串
         f"Authentication={RUNTIME.td_authentication};"
         f"TMODE={RUNTIME.td_tmode};"
     )

@@ -140,14 +140,34 @@ def _render_plotly_jsons(jsons):
             st.warning(f"⚠️ Plotly 圖渲染失敗：{e}")
 
 
-def _render_essbase_aggrid(csv_path: str):
-    """🚀 把 Essbase 格式資料用 AgGrid 做企業級樹狀群組展示（沒裝就退回一般表格）。"""
-    if not os.path.exists(csv_path):
-        st.error("❌ 找不到資料庫快取 CSV 檔案。")
-        return
-    df = pd.read_csv(csv_path)
-    st.markdown(f"📊 **資料庫完整數據明細（共 {len(df)} 筆紀錄）**")
+@st.cache_data(show_spinner=False)
+def _load_db_csv(csv_path: str, mtime: float) -> pd.DataFrame:
+    """讀 DB 快取 CSV，以 (路徑, mtime) 快取——st.tabs 每次 rerun 都會重跑所有頁籤、
+    歷史每則 DB 訊息也會重渲染，沒快取會重複讀同一個檔。mtime 變動才重讀。"""
+    return pd.read_csv(csv_path)
 
+
+@st.cache_data(show_spinner=False)
+def _pivot_html(csv_path: str, mtime: float) -> str:
+    """產生 PivotTableJS HTML，以 (路徑, mtime) 快取——pivot_ui 建表很貴，
+    避免每次 rerun 都為每則 DB 訊息重建一次。"""
+    df = _load_db_csv(csv_path, mtime)
+    tmp = os.path.join("temp_dir", f"_pivot_{abs(hash((csv_path, mtime)))}.html")
+    os.makedirs("temp_dir", exist_ok=True)
+    pivot_ui(df, outfile=tmp)
+    try:
+        with open(tmp, "r", encoding="utf-8") as f:
+            return f.read()
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
+def _render_essbase_aggrid(df: pd.DataFrame):
+    """🚀 把 Essbase 格式資料用 AgGrid 做企業級樹狀群組展示（沒裝就退回一般表格）。"""
+    st.markdown(f"📊 **資料庫完整數據明細（共 {len(df)} 筆紀錄）**")
     if not HAS_ADVANCED_GRID:
         st.dataframe(df, use_container_width=True)
         st.caption("💡 安裝 `streamlit-aggrid` 可解鎖多層級群組展開功能。")
@@ -167,31 +187,19 @@ def _render_essbase_aggrid(csv_path: str):
            theme="alpine", height=450)
 
 
-def _render_essbase_pivotjs(csv_path: str, msg_id: str):
+def _render_essbase_pivotjs(csv_path: str, mtime: float):
     """🚀 把 Essbase 資料嵌入 PivotTableJS，還原 Excel 自由拖拉拽樞紐體驗。"""
-    if not os.path.exists(csv_path):
-        return
     if not HAS_ADVANCED_GRID:
         st.warning("請先安裝 `streamlit-pivottablejs`（pip install streamlit-pivottablejs）。")
         return
-    df = pd.read_csv(csv_path)
-    html_filename = f"temp_pivot_{msg_id}.html"  # 帶 id，避免多輪並發互相覆蓋
-    pivot_ui(df, outfile=html_filename)
-    if os.path.exists(html_filename):
-        with open(html_filename, "r", encoding="utf-8") as f:
-            html_content = f.read()
-        components.html(html_content, height=600, scrolling=True)
-        try:
-            os.remove(html_filename)  # 自動回收暫存檔
-        except OSError:
-            pass
+    components.html(_pivot_html(csv_path, mtime), height=600, scrolling=True)
 
 
 def _render_static_payload(payload: dict):
     """文字報告 + Plotly/figures/HTML 表格/圖片（不含 DB 樞紐 Tabs）。"""
     if payload.get("content"):
         # 清掉可能殘留的後端隱藏路徑標記，維持畫面純淨
-        st.markdown(payload["content"].split("__CSV_CACHE_PATH__:")[0].rstrip())
+        st.markdown(payload["content"].split(agent_mod._CSV_CACHE_MARKER)[0].rstrip())
     _render_plotly_jsons(payload.get("plotly_jsons"))
     for fig in payload.get("figures", []) or []:
         st.plotly_chart(fig, use_container_width=True)
@@ -204,17 +212,19 @@ def _render_static_payload(payload: dict):
 
 def _render_payload_with_tabs(payload: dict, msg_idx: int):
     """有 DB 大數據快取時，用 Tabs 把『AI 報告 / 企業級網格 / 自由樞紐』空間隔離；
-    否則維持單一文字流。"""
+    否則維持單一文字流。CSV 只讀一次，傳給兩個頁籤共用。"""
     csv_path = payload.get("csv_cache_path", "")
     if csv_path and os.path.exists(csv_path):
+        mtime = os.path.getmtime(csv_path)
+        df = _load_db_csv(csv_path, mtime)
         tab1, tab2, tab3 = st.tabs(
             ["🤖 AI 智能解讀報告", "🗂️ 企業級數據網格 (AgGrid)", "🔀 自由拖拉樞紐分析 (Excel UI)"])
         with tab1:
             _render_static_payload(payload)
         with tab2:
-            _render_essbase_aggrid(csv_path)
+            _render_essbase_aggrid(df)
         with tab3:
-            _render_essbase_pivotjs(csv_path, f"{msg_idx}_{round(os.path.getmtime(csv_path))}")
+            _render_essbase_pivotjs(csv_path, mtime)
     else:
         _render_static_payload(payload)
 

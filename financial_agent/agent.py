@@ -1214,6 +1214,12 @@ _GATHER_TOOL_NAMES = {
     "get_database_schema", "run_sql_query",
 }
 
+# 這些意圖「沒有工具就不可能完成」（查 DB／檔案分析），第一步必須真的呼叫工具。
+# 否則 MoE 執行器在 tool_choice="auto" 下常直接回文字、收集空手 → 誤報「資料不足」。
+_TOOL_REQUIRED_INTENTS = {
+    IntentType.DATABASE_QUERY, IntentType.FILE_ANALYSIS, IntentType.MULTI_FILE_COMPARE,
+}
+
 
 def _gather_tools() -> List[dict]:
     names = _GATHER_TOOL_NAMES | MCP_TOOL_NAMES
@@ -1448,6 +1454,8 @@ def _gather_evidence(plan: PlanningResult, user_prompt: str,
     fail_sig: Optional[tuple] = None  # (工具名, 錯誤全文)：追蹤連續相同失敗以便熔斷
     fail_count = 0
     aborted = False
+    # 工具必需的意圖：在還沒用過任何工具前，強制執行器一定要呼叫工具（不准只回文字）
+    force_tool = plan.intent in _TOOL_REQUIRED_INTENTS
 
     for step in range(1, RUNTIME.max_steps + 1):
         print(f"\n  [Gather {step}/{RUNTIME.max_steps}]")
@@ -1456,8 +1464,19 @@ def _gather_evidence(plan: PlanningResult, user_prompt: str,
                       "temperature": 0.1, "timeout": RUNTIME.request_timeout}
             if tools:
                 params["tools"] = tools
-                params["tool_choice"] = "auto"
-            api_resp = client.chat.completions.create(**params)
+                # 必需工具的意圖在尚未用過工具時用 "required" 逼模型呼叫；其餘交給 "auto"
+                params["tool_choice"] = "required" if (force_tool and not tool_used) else "auto"
+            try:
+                api_resp = client.chat.completions.create(**params)
+            except Exception as e_choice:  # noqa: BLE001
+                # 舊版 Ollama 可能不認得 tool_choice="required"；降級成 "auto" 再試一次，
+                # 不要因為這個就整輪失敗（至少還有 nudge 補救）。
+                if params.get("tool_choice") == "required":
+                    print(f"  ↪︎ tool_choice=required 不被接受（{e_choice}），降級 auto 重試")
+                    params["tool_choice"] = "auto"
+                    api_resp = client.chat.completions.create(**params)
+                else:
+                    raise
         except Exception as e:  # noqa: BLE001
             _trace(resp, "gather_error", error=str(e))
             # 收集階段一開始就失敗（常見：執行器模型名稱打錯/未安裝）。

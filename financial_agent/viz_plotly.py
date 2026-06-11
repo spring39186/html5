@@ -306,20 +306,38 @@ def generate_plotly(
         plotly_jsons: list[str] = field(default_factory=list)
     """
 
-    def _strip_fences(raw: str) -> str:
-        """Remove ```python ... ``` or ``` ... ``` markdown fences."""
-        raw = (raw or "").strip()
-        if "```python" in raw:
-            raw = raw.split("```python", 1)[1]
-            raw = raw.split("```", 1)[0]
-        elif raw.startswith("```"):
-            parts = raw.split("```")
-            # parts[0] is empty, parts[1] is the code block, parts[2] is after
-            raw = parts[1] if len(parts) > 1 else raw
-        return raw.strip()
+    return run_plotly_from_message(
+        build_chart_prompt(charts), coder_call, run_script_fn, max_repair)
 
+
+def _strip_fences(raw: str) -> str:
+    """Remove ```python ... ``` or ``` ... ``` markdown fences."""
+    raw = (raw or "").strip()
+    if "```python" in raw:
+        raw = raw.split("```python", 1)[1]
+        raw = raw.split("```", 1)[0]
+    elif raw.startswith("```"):
+        parts = raw.split("```")
+        # parts[0] is empty, parts[1] is the code block, parts[2] is after
+        raw = parts[1] if len(parts) > 1 else raw
+    return raw.strip()
+
+
+def run_plotly_from_message(
+    user_message: str,
+    coder_call: Callable[[list[dict], float], str],
+    run_script_fn: Callable[[str], Tuple[str, str]],
+    max_repair: int = 1,
+) -> dict:
+    """Core pipeline shared by structured and free-form callers: given a ready
+    user message, generate Plotly code, run it, repair once on failure, and
+    extract the figure JSON.  ``generate_plotly`` wraps this with
+    ``build_chart_prompt``; free-form callers pass their own prose message.
+
+    Returns the same dict as :func:`generate_plotly`
+    (``plotly_jsons``, ``code``, ``stdout``, ``stderr``).
+    """
     # ---- Build initial prompt ----
-    user_message = build_chart_prompt(charts)
     messages: list[dict] = [
         {"role": "system", "content": PLOTLY_CODE_SYSTEM_PROMPT},
         {"role": "user", "content": user_message},

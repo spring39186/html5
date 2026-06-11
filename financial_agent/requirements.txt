@@ -18,3 +18,10 @@ sentence-transformers>=2.2
 plotly>=5.20
 # LangGraph 編排 FA_USE_GRAPH：
 langgraph>=0.2
+
+# ── Teradata DB 查詢（database_query）相依 ──
+pyodbc>=5.0             # 連 Teradata（另需安裝 Teradata ODBC 驅動）；開發機可不裝
+tabulate>=0.9           # df.to_markdown() 前 30 筆預覽（缺少時退回 to_string）
+# 前端高階數據組件（DB 大數據樹狀網格 + 自由樞紐；缺少時自動降級成一般表格）：
+streamlit-aggrid>=1.0
+streamlit-pivottablejs>=0.2

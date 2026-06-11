@@ -18,6 +18,33 @@ import os
 from dataclasses import dataclass
 
 
+def _load_dotenv(filename: str = ".env") -> None:
+    """極簡 .env 載入：把 KEY=VALUE 寫進環境變數（已存在的真實環境變數優先）。
+    設定寫在 .env 檔即可，不必每次在 PowerShell key 變數。"""
+    for path in (filename, os.path.join(os.path.dirname(__file__), filename)):
+        if os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#") or "=" not in line:
+                            continue
+                        key, val = line.split("=", 1)
+                        key = key.strip()
+                        val = val.strip()
+                        if val[:1] not in ('"', "'") and " #" in val:
+                            val = val.split(" #", 1)[0].strip()  # 去行內註解
+                        val = val.strip('"').strip("'")
+                        if key:
+                            os.environ.setdefault(key, val)  # 真實環境變數優先
+            except Exception:  # noqa: BLE001
+                pass
+            break
+
+
+_load_dotenv()  # 必須在讀取 os.getenv 之前
+
+
 def _bool_env(name: str, default: str = "0") -> bool:
     """統一的環境變數布林解析（避免各處複製 in ("1","true","yes","on")）。"""
     return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "on")
@@ -54,7 +81,7 @@ class RuntimeConfig:
     # 單次 LLM 請求逾時（秒）。超過就放棄該次呼叫並走降級，避免整個 app 卡死。
     request_timeout: int = int(os.getenv("FA_REQUEST_TIMEOUT", "240"))
     # 餵給總結 agent 的證據總長度上限（字元），避免輸入過大導致超慢。
-    max_evidence_chars: int = int(os.getenv("FA_MAX_EVIDENCE_CHARS", "12000"))
+    max_evidence_chars: int = int(os.getenv("FA_MAX_EVIDENCE_CHARS", "16000"))
     # OCR 正規化語言：預設 "en" → 解析後把每頁統一翻成英文再入庫（跨多國語言文件，
     # 大幅減少跨語言檢索與整合漏資料的問題）。設成 "" 可關閉。
     normalize_lang: str = os.getenv("FA_NORMALIZE_LANG", "en")
@@ -68,11 +95,35 @@ class RuntimeConfig:
 
     # ── Production refactor 功能開關（全部預設關閉，開啟才啟用新模組，確保零破壞）──
     hybrid_retrieval: bool = _bool_env("FA_HYBRID_RETRIEVAL")  # retrieval.py + query_processing.py
-    use_plotly: bool = _bool_env("FA_PLOTLY")                  # viz_plotly.py（互動圖）
+    use_plotly: bool = _bool_env("FA_PLOTLY", "1")            # viz_plotly.py（互動圖）— 預設開啟，與 Streamlit 整合較佳；設 0 回退 matplotlib
     concurrent_ocr: bool = _bool_env("FA_CONCURRENT_OCR")      # ocr_pipeline.py（並發OCR）
     struct_chunk: bool = _bool_env("FA_STRUCT_CHUNK")          # chunking.py（結構化分塊）
     use_graph: bool = _bool_env("FA_USE_GRAPH")                # graph.py（LangGraph 編排）
     rerank_model: str = os.getenv("FA_RERANK_MODEL", "")  # 設 cross-encoder 名稱才啟用 rerank（如 BAAI/bge-reranker-base）
+    # 確定性解析管線：file_analysis/multi_file 改用「解析所有檔→標準指標檢索（檔案層級多工）」，
+    # 不再讓執行器逐步 LLM 決策，更快更穩。預設關閉。
+    deterministic_gather: bool = _bool_env("FA_DETERMINISTIC_GATHER")
+    gather_workers: int = int(os.getenv("FA_GATHER_WORKERS", "3"))  # 解析管線檢索階段的並行數
+
+    # 懶人 OCR：PDF 有可用文字層就直接抽取（含 find_tables 還原表格），不呼叫 vision（glm-ocr）。
+    # 省成本，但實測 find_tables 抽原生財報表格不穩、易漏數據；故「預設關閉」、改全頁 vision OCR。
+    # 想省成本再設 FA_LAZY_OCR=1。
+    lazy_ocr: bool = os.getenv("FA_LAZY_OCR", "0").strip().lower() in ("1", "true", "yes", "on")
+
+    # ── Teradata（DB 查詢）連線：機密一律放 .env 或真實環境變數，勿寫進程式碼 ──
+    td_driver: str = os.getenv("FA_TD_DRIVER", "Teradata Database ODBC Driver 17.20")
+    td_dbcname: str = os.getenv("FA_TD_DBCNAME", "")   # 伺服器位址；空 → 視為未設定
+    td_uid: str = os.getenv("FA_TD_UID", "")
+    td_pwd: str = os.getenv("FA_TD_PWD", "")
+    td_table: str = os.getenv("FA_TD_TABLE", "HDATA.SAL_DRAFT_RPT_HC")
+    td_authentication: str = os.getenv("FA_TD_AUTH", "SYSTEM")
+    td_tmode: str = os.getenv("FA_TD_TMODE", "TERA")
+    td_encoding: str = os.getenv("FA_TD_ENCODING", "big5")  # Big5 解碼防亂碼
+
+    @property
+    def td_configured(self) -> bool:
+        """連線三要素都有才算設定完成（否則 run_sql_query 直接回明確錯誤、不亂連）。"""
+        return bool(self.td_dbcname and self.td_uid and self.td_pwd)
 
 
 MODEL_CONFIG = ModelConfig()

@@ -118,8 +118,9 @@ def _visualize(state: AgentState) -> dict:
 
 def _gather(state: AgentState) -> dict:
     resp = state["_resp"]
-    evidence = agent._gather_evidence(state["_plan"], state["user_query"],
-                                      state.get("file_registry") or {}, resp)
+    # gather 內部即把 DB 大數據 CSV 快取路徑寫進 resp.csv_cache_path（前端解鎖樞紐/網格 Tab）
+    evidence = agent.gather(state["_plan"], state["user_query"],
+                            state.get("file_registry") or {}, resp)
     return {"_resp": resp, "evidence": evidence}
 
 

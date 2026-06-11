@@ -1644,6 +1644,13 @@ def _gather_evidence(plan: PlanningResult, user_prompt: str,
                    reason="repeated_tool_error", error=_preview(fail_sig[1] if fail_sig else "", 300))
             break
 
+        # DB 查詢已成功撈到資料（CSV 落地）：立刻結束收集。資料就是我們要的全部，
+        # 不必再多問一次執行器「還要不要做別的」——那一次 LLM 呼叫可能卡很久
+        # （實測經 LiteLLM 卡 9 分鐘、最後 504 逾時），白白拖垮整輪。
+        if plan.intent == IntentType.DATABASE_QUERY and resp.csv_cache_path:
+            print("  └─ ✅ DB 查詢已取得資料，提前結束收集（省去多餘的執行器呼叫）")
+            break
+
     _trace(resp, "gather_done", evidence_count=len(evidence))
     return evidence
 

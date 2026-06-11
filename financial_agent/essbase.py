@@ -96,12 +96,11 @@ def to_pivot_ready(df: "pd.DataFrame") -> "pd.DataFrame":
         if cu.shape[1] > 1:
             out["UNIT"] = cu[1]
 
-    # 5) 清 null：階層較淺的列在較深的 ORG_Ln（及其他衍生維度欄）會留下 None
-    #    （ragged hierarchy）。前端／CSV 顯示一堆 'null'/'None' 很雜，
-    #    一律以空字串取代——維度欄空白即可，不影響加總，也不誤刪任何列。
-    derived_dims = [c for c in out.columns if c.startswith("ORG_L")]
-    derived_dims += [c for c in ("PARENT", "MONTH", "CURRENCY", "UNIT") if c in out.columns]
-    for c in derived_dims:
-        out[c] = out[c].fillna("")
+    # 5) 清 null：把「全部文字欄」（原始欄 + 衍生欄）的 NaN/None 一律補空字串，
+    #    讓轉好的 CSV / 樞紐完全不出現 null（含原始 SCENARIO 等欄位若 DB 本身有空值）。
+    #    數值欄（AMT、MONTH_NO）保留數值語意、不動。階層欄較深的空格已在步驟 1 ffill 補滿。
+    str_cols = out.select_dtypes(include=["object"]).columns
+    if len(str_cols):
+        out[str_cols] = out[str_cols].fillna("")
 
     return out

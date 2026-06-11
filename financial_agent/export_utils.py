@@ -102,6 +102,11 @@ def _fmt_trace_event(ev: dict) -> str:
         parts.append(f"  - 生成程式碼:\n\n```python\n{ev['code']}\n```")
     if ev.get("output"):
         parts.append(f"  - 輸出: {ev['output']}")
+    if ev.get("error"):
+        et = ev.get("error_type", "")
+        parts.append(f"  - ❌ 錯誤{f'（{et}）' if et else ''}: {ev['error']}")
+    if ev.get("traceback"):
+        parts.append(f"  - 例外堆疊（定位來源）:\n\n```\n{ev['traceback']}\n```")
     return "\n".join(parts)
 
 

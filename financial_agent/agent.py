@@ -1439,6 +1439,9 @@ def _gather_evidence(plan: PlanningResult, user_prompt: str,
     evidence: List[str] = []
     tool_used = False
     nudged = False
+    fail_sig: Optional[tuple] = None  # (工具名, 錯誤全文)：追蹤連續相同失敗以便熔斷
+    fail_count = 0
+    aborted = False
 
     for step in range(1, RUNTIME.max_steps + 1):
         print(f"\n  [Gather {step}/{RUNTIME.max_steps}]")
@@ -1515,6 +1518,24 @@ def _gather_evidence(plan: PlanningResult, user_prompt: str,
                 evidence.append(f"【{func_name}｜{args.get('search_query') or args.get('sql') or ''}】\n"
                                 f"{_preview(result_str, 2500)}")
 
+            # 熔斷：同一工具連續吐出「一模一樣」的執行錯誤，代表是環境/系統層問題
+            # （例如前端 UI 競態、驅動缺失），模型再怎麼重試都只會原地打轉。
+            # 第二次就停止收集，把根因寫進證據讓報告誠實說明，
+            # 避免像 kb_uploader key 衝突那次一樣空轉十分鐘還回報「資料不足」。
+            if result_str.startswith("⚠️ 工具執行錯誤"):
+                sig = (func_name, result_str)
+                fail_count = fail_count + 1 if sig == fail_sig else 1
+                fail_sig = sig
+                if fail_count >= 2:
+                    evidence.append(
+                        f"⚠️ 系統錯誤：工具 {func_name} 連續 {fail_count} 次回報相同錯誤，已停止重試。\n"
+                        f"錯誤內容：{_preview(result_str, 600)}\n"
+                        "請在報告中明確說明這是「系統/環境層錯誤」（不是資料不足、也不是查無資料），"
+                        "並提示使用者排除該錯誤後重新查詢。")
+                    aborted = True
+            else:
+                fail_sig, fail_count = None, 0
+
             _trace(resp, "tool_call", step=step, tool=func_name,
                    thought=args.get("thought_process"),
                    args={k: v for k, v in args.items() if k != "thought_process"},
@@ -1527,6 +1548,12 @@ def _gather_evidence(plan: PlanningResult, user_prompt: str,
                 # 完整結果已另存進 evidence 供總結使用。避免 messages 累積爆量拖慢每一步。
                 "content": _preview(result_str, 1200),
             })
+
+        if aborted:
+            print("  └─ ⛔ 偵測到連續相同的工具系統錯誤，熔斷收集迴圈（不再重試）")
+            _trace(resp, "gather_abort", tool=(fail_sig[0] if fail_sig else ""),
+                   reason="repeated_tool_error", error=_preview(fail_sig[1] if fail_sig else "", 300))
+            break
 
     _trace(resp, "gather_done", evidence_count=len(evidence))
     return evidence

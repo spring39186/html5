@@ -103,4 +103,9 @@ def to_pivot_ready(df: "pd.DataFrame") -> "pd.DataFrame":
     if len(str_cols):
         out[str_cols] = out[str_cols].fillna("")
 
+    # 6) 移除「無名/空白/null」欄：避免前端樞紐冒出一個標題叫 'null' 的欄位
+    out = out.loc[:, [c for c in out.columns
+                      if str(c).strip() != "" and not str(c).startswith("Unnamed")
+                      and str(c).strip().lower() not in ("nan", "none", "null")]]
+
     return out

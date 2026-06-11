@@ -155,7 +155,12 @@ def _render_plotly_jsons(jsons):
 def _load_db_csv(csv_path: str, mtime: float) -> pd.DataFrame:
     """讀 DB 快取 CSV，以 (路徑, mtime) 快取——st.tabs 每次 rerun 都會重跑所有頁籤、
     歷史每則 DB 訊息也會重渲染，沒快取會重複讀同一個檔。mtime 變動才重讀。"""
-    df = pd.read_csv(csv_path)
+    # 用 utf-8-sig 讀（落地時是 utf-8-sig）→ 去掉 BOM，否則第一欄名會帶 ﻿。
+    df = pd.read_csv(csv_path, encoding="utf-8-sig")
+    # 丟掉「無名/空白/Unnamed」欄：空表頭會被 PivotTableJS/AgGrid 顯示成一個叫 'null' 的欄位。
+    df = df.loc[:, [c for c in df.columns
+                    if str(c).strip() != "" and not str(c).startswith("Unnamed")
+                    and str(c).strip().lower() not in ("nan", "none", "null")]]
     # pd.read_csv 預設把空字串讀成 NaN → PivotTableJS/AgGrid 會顯示成 'null' 並開一個 null 桶。
     # 把「文字維度欄」的 NaN 填回空字串（數值欄如 AMT/MONTH_NO 維持數值，不動）。
     obj_cols = df.select_dtypes(include="object").columns
@@ -168,7 +173,7 @@ def _load_db_csv(csv_path: str, mtime: float) -> pd.DataFrame:
 def _pivot_html(csv_path: str, mtime: float) -> str:
     """產生 PivotTableJS HTML，以 (路徑, mtime) 快取——pivot_ui 建表很貴，
     避免每次 rerun 都為每則 DB 訊息重建一次。"""
-    df = _load_db_csv(csv_path, mtime)
+    df = _load_db_csv(csv_path, mtime).reset_index(drop=True)  # reset_index 避免 pivot 帶出 index 欄
     # 保險：AMT 強制數值（後端已轉，但歷史舊快取可能仍是字串）→ 讓樞紐能 Sum
     if "AMT" in df.columns:
         df["AMT"] = pd.to_numeric(df["AMT"], errors="coerce")

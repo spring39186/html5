@@ -47,6 +47,12 @@ def to_pivot_ready(df: "pd.DataFrame") -> "pd.DataFrame":
     欄位不存在就略過該段轉換，對任意查詢結果都安全。"""
     out = df.copy()
 
+    # 0) AMT 是金額「度量」，務必轉成數值。從 Teradata 來常是 Decimal/字串，
+    #    一旦以文字落地，PivotTableJS / AgGrid 會把它當成「維度」而非可加總的值
+    #    → 拖過去只變成欄位、只能算件數(Count)、不能 Sum。強制轉 numeric 根治。
+    if "AMT" in out.columns:
+        out["AMT"] = pd.to_numeric(out["AMT"], errors="coerce")
+
     # 1) 組織階層展開：CHILD_SITE_ORG → ORG_L1..ORG_Ln（前端逐層下鑽/群組的關鍵）
     if "CHILD_SITE_ORG" in out.columns:
         levels = out["CHILD_SITE_ORG"].map(split_members)

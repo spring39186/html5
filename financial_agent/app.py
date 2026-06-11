@@ -163,11 +163,17 @@ def _pivot_html(csv_path: str, mtime: float) -> str:
     """產生 PivotTableJS HTML，以 (路徑, mtime) 快取——pivot_ui 建表很貴，
     避免每次 rerun 都為每則 DB 訊息重建一次。"""
     df = _load_db_csv(csv_path, mtime)
+    # 保險：AMT 強制數值（後端已轉，但歷史舊快取可能仍是字串）→ 讓樞紐能 Sum
+    if "AMT" in df.columns:
+        df["AMT"] = pd.to_numeric(df["AMT"], errors="coerce")
     tmp = os.path.join("temp_dir", f"_pivot_{abs(hash((csv_path, mtime)))}.html")
     os.makedirs("temp_dir", exist_ok=True)
     # 注意：pivottablejs.pivot_ui 的輸出參數叫 outfile_path（不是 outfile）。
     # 傳錯名會被 **kwargs 吃掉、實際寫到預設的 pivottablejs.html，導致下方 open(tmp) 找不到檔。
-    pivot_ui(df, outfile_path=tmp)
+    # 預設就以「Sum of AMT」開場（aggregatorName=Sum, vals=[AMT]），使用者再自行拖維度；
+    # 否則 PivotTableJS 預設是 Count，會讓人以為 AMT 不能加總。
+    pivot_kwargs = {"aggregatorName": "Sum", "vals": ["AMT"]} if "AMT" in df.columns else {}
+    pivot_ui(df, outfile_path=tmp, **pivot_kwargs)
     try:
         with open(tmp, "r", encoding="utf-8") as f:
             return f.read()

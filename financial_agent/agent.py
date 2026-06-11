@@ -40,6 +40,7 @@ import json
 import time
 import base64
 import subprocess
+import traceback
 import tempfile
 from enum import Enum
 from datetime import datetime, timezone
@@ -1551,6 +1552,14 @@ def _gather_evidence(plan: PlanningResult, user_prompt: str,
                 result = dispatch_tool(func_name, args, file_registry,
                                        resp.thought_logs, intent=plan.intent.value)
             except Exception as e:  # noqa: BLE001
+                # 抓完整 traceback 寫進 trace：當工具丟出「不該由它丟出」的例外
+                # （例如 agent.py 無 streamlit 卻冒出 Streamlit 的 kb_uploader 錯）時，
+                # 這個堆疊會明確指出例外真正的來源檔案與行號，終結瞎猜。
+                tb = traceback.format_exc()
+                print(f"  ✗ 工具 {func_name} 例外：\n{tb}")
+                _trace(resp, "tool_error", step=step, tool=func_name,
+                       error=str(e), error_type=type(e).__name__,
+                       traceback=_preview(tb, 2000))
                 result = f"⚠️ 工具執行錯誤: {e}"
             duration_ms = round((time.perf_counter() - t0) * 1000, 1)
 

@@ -968,18 +968,34 @@ def run_sql_query(args: dict, file_registry: dict) -> str:
     # Essbase 長表 → 樞紐友善結構：把階層/時間/幣別等複合字串拆成正規維度欄
     # （ORG_L1.., YEAR/MONTH/MONTH_NO, CURRENCY/UNIT），前端才能真正多維下鑽與正確排序。
     from essbase import to_pivot_ready
-    to_pivot_ready(df).to_csv(csv_path, index=False, encoding="utf-8-sig")
-    print(f"   └─ {len(df)} 筆 → 落地 {csv_path}")
+    pivot_df = to_pivot_ready(df)
+    pivot_df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    print(f"   └─ {len(pivot_df)} 筆 → 落地 {csv_path}")
+
+    # 另存一份「時間戳檢查檔」，供人工開 Excel 核對轉換結果（不被下次查詢覆蓋）
+    inspect_path = ""
+    try:
+        inspect_dir = os.path.join(RUNTIME.cache_dir, "exports")
+        os.makedirs(inspect_dir, exist_ok=True)
+        inspect_path = os.path.join(
+            inspect_dir, f"db_pivot_{time.strftime('%Y%m%d_%H%M%S')}.csv")
+        pivot_df.to_csv(inspect_path, index=False, encoding="utf-8-sig")
+        print(f"   └─ 人工檢查副本 → {os.path.abspath(inspect_path)}")
+    except Exception as e:  # noqa: BLE001  檢查副本非關鍵，失敗不影響主流程
+        print(f"   ⚠️ 檢查副本寫入失敗（不影響查詢）：{e}")
 
     try:
         preview_md = df.head(30).to_markdown(index=False)
     except Exception:  # noqa: BLE001  缺 tabulate 時退回純文字
         preview_md = df.head(30).to_string(index=False)
 
+    inspect_note = (f"🔎 [人工檢查副本]：{os.path.abspath(inspect_path)}\n"
+                    if inspect_path else "")
     return (
         f"✅ Teradata 查詢成功！共從 `{RUNTIME.td_table}` 撈取 {len(df)} 筆明細資料。\n\n"
         f"【資料庫結果預覽（前 30 筆）】\n{preview_md}\n\n"
         f"💡 [系統管線指令]：完整大數據集已安全暫存於本地快取：'{csv_path}'。\n"
+        f"{inspect_note}"
         f"後續若需 run_python_code 產生樞紐表或繪圖，請命令 Coder 直接讀此檔分析：\n"
         f"```python\nimport pandas as pd\ndf = pd.read_csv(r'{csv_path}')\n```\n"
         f"嚴禁模型自行硬編碼或虛構數據。\n\n"

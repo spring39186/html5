@@ -81,4 +81,12 @@ def to_pivot_ready(df: "pd.DataFrame") -> "pd.DataFrame":
         if cu.shape[1] > 1:
             out["UNIT"] = cu[1]
 
+    # 5) 清 null：階層較淺的列在較深的 ORG_Ln（及其他衍生維度欄）會留下 None
+    #    （ragged hierarchy）。前端／CSV 顯示一堆 'null'/'None' 很雜，
+    #    一律以空字串取代——維度欄空白即可，不影響加總，也不誤刪任何列。
+    derived_dims = [c for c in out.columns if c.startswith("ORG_L")]
+    derived_dims += [c for c in ("PARENT", "MONTH", "CURRENCY", "UNIT") if c in out.columns]
+    for c in derived_dims:
+        out[c] = out[c].fillna("")
+
     return out

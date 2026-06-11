@@ -969,7 +969,16 @@ def run_sql_query(args: dict, file_registry: dict) -> str:
     # （ORG_L1.., YEAR/MONTH/MONTH_NO, CURRENCY/UNIT），前端才能真正多維下鑽與正確排序。
     from essbase import to_pivot_ready
     pivot_df = to_pivot_ready(df)
-    pivot_df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    try:
+        pivot_df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    except (PermissionError, OSError) as e:
+        # Windows 常見：db_query_result.csv 正開在 Excel/其他程式 → 檔案被鎖、無法覆寫。
+        # 改寫到帶時間戳的新檔，查詢照樣成功、前端讀新檔，不讓「忘了關 Excel」擋住整個查詢。
+        alt = os.path.join(RUNTIME.cache_dir,
+                           f"db_query_result_{time.strftime('%Y%m%d_%H%M%S')}.csv")
+        print(f"   ⚠️ 無法覆寫 {csv_path}（{e}）；改存 {alt}")
+        pivot_df.to_csv(alt, index=False, encoding="utf-8-sig")
+        csv_path = alt
     print(f"   └─ {len(pivot_df)} 筆 → 落地 {csv_path}")
 
     # 另存一份「時間戳檢查檔」，供人工開 Excel 核對轉換結果（不被下次查詢覆蓋）

@@ -159,17 +159,15 @@ def set_progress_hook(fn) -> None:
 
 
 def _progress(message: str) -> None:
-    """回報一句進度給前端（hook 失敗絕不影響主流程）。
-    刻意連 BaseException 一起吞：Streamlit 在長任務執行中若觸發 rerun/stop，
-    會丟出 RerunException/StopException（屬 BaseException），這類 UI 控制流訊號
-    一旦穿進 agent 就會汙染工具結果（例如被誤記成『工具執行錯誤』）。
-    進度只是顯示，吞掉最安全——被取代的這輪算完即可，Streamlit 自會用新一輪重畫。"""
+    """回報一句進度給前端（hook 失敗不影響主流程）。
+    只吞一般 Exception；Streamlit 的 RerunException / StopException 屬 BaseException，
+    一定要讓它往外傳，Streamlit 才能「乾淨地中止被取代的那一輪 script」。
+    若把它吞掉，被中止的 run 不會 unwind，殘留的 widget 註冊（如 file_uploader 的
+    key=kb_uploader_0）會與下一輪同 key 的元件相撞 → duplicate key 錯誤。"""
     if _PROGRESS_HOOK is not None:
         try:
             _PROGRESS_HOOK(message)
-        except (KeyboardInterrupt, SystemExit):
-            raise
-        except BaseException:  # noqa: BLE001  含 Streamlit RerunException/StopException
+        except Exception:  # noqa: BLE001  只吞顯示錯誤；控制流例外(BaseException)放行
             pass
 
 

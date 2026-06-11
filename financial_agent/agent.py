@@ -1469,7 +1469,7 @@ def _gather_evidence(plan: PlanningResult, user_prompt: str,
             try:
                 api_resp = client.chat.completions.create(**params)
             except Exception as e_choice:  # noqa: BLE001
-                # 舊版 Ollama 可能不認得 tool_choice="required"；降級成 "auto" 再試一次，
+                # 有些 OpenAI 相容後端不認得 tool_choice="required"；降級成 "auto" 再試一次，
                 # 不要因為這個就整輪失敗（至少還有 nudge 補救）。
                 if params.get("tool_choice") == "required":
                     print(f"  ↪︎ tool_choice=required 不被接受（{e_choice}），降級 auto 重試")

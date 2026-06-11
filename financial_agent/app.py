@@ -155,7 +155,13 @@ def _render_plotly_jsons(jsons):
 def _load_db_csv(csv_path: str, mtime: float) -> pd.DataFrame:
     """讀 DB 快取 CSV，以 (路徑, mtime) 快取——st.tabs 每次 rerun 都會重跑所有頁籤、
     歷史每則 DB 訊息也會重渲染，沒快取會重複讀同一個檔。mtime 變動才重讀。"""
-    return pd.read_csv(csv_path)
+    df = pd.read_csv(csv_path)
+    # pd.read_csv 預設把空字串讀成 NaN → PivotTableJS/AgGrid 會顯示成 'null' 並開一個 null 桶。
+    # 把「文字維度欄」的 NaN 填回空字串（數值欄如 AMT/MONTH_NO 維持數值，不動）。
+    obj_cols = df.select_dtypes(include="object").columns
+    if len(obj_cols):
+        df[obj_cols] = df[obj_cols].fillna("")
+    return df
 
 
 @st.cache_data(show_spinner=False)

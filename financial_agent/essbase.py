@@ -57,22 +57,37 @@ def to_pivot_ready(df: "pd.DataFrame") -> "pd.DataFrame":
     if "CHILD_SITE_ORG" in out.columns:
         levels = out["CHILD_SITE_ORG"].map(split_members)
         depth = int(levels.map(len).max()) if len(levels) else 0
+        org_cols = [f"ORG_L{i + 1}" for i in range(depth)]
         for i in range(depth):
             out[f"ORG_L{i + 1}"] = levels.map(
                 lambda parts, _i=i: parts[_i] if _i < len(parts) else None)
+        # 補滿 ragged 階層：較淺的列把「最深的已知層級」向右補滿（ffill），
+        # 這樣在樞紐拖深層欄位時不會冒出一個空(null)桶——空格改成沿用上一層的葉節點。
+        if org_cols:
+            out[org_cols] = out[org_cols].ffill(axis=1)
 
     # 2) 父組織：去括號取最末層，當乾淨的列標籤
     if "PARENT_SITE_ORG" in out.columns:
         out["PARENT"] = out["PARENT_SITE_ORG"].map(
             lambda v: (split_members(v) or [None])[-1])
 
-    # 3) 時間維度：'YYYY_Mon' → YEAR / MONTH / MONTH_NO（MONTH_NO 供正確排序）
+    # 3) 時間維度：'YYYY_Mon' → YEAR / MONTH / MONTH_NO，並把月份改成「可排序」格式。
+    #    原本 'Jan/Feb...' 是英文縮寫，字串排序會變 Apr<Aug<Dec...。改成零補位數字後，
+    #    PivotTableJS / AgGrid / Excel 一律按 Jan→Dec 正確排序，不需自訂 sorter。
     if "YEAR_MON" in out.columns:
         ym = out["YEAR_MON"].astype(str).str.split("_", n=1, expand=True)
         out["YEAR"] = ym[0]
         if ym.shape[1] > 1:
-            out["MONTH"] = ym[1]
-            out["MONTH_NO"] = out["MONTH"].map(_MONTH_NO).astype("Int64")
+            mon_abbr = ym[1].fillna("")
+            mon_no = mon_abbr.map(_MONTH_NO)                       # 1..12 或 NaN
+            out["MONTH_NO"] = mon_no.astype("Int64")
+            mm = mon_no.map(lambda n: f"{int(n):02d}" if pd.notna(n) else "")
+            # MONTH = '06 Jun'（可排序又保留月名）
+            out["MONTH"] = [f"{p} {a}".strip() if p else a
+                            for p, a in zip(mm, mon_abbr)]
+            # YEAR_MON 重排成 'YYYY_MM'（'2014_Jun' → '2014_06'）；對不到月份就保留原值
+            out["YEAR_MON"] = [f"{y}_{p}" if p else orig for y, p, orig
+                               in zip(out["YEAR"].astype(str), mm, out["YEAR_MON"].astype(str))]
 
     # 4) 幣別/單位：'USD K' → CURRENCY / UNIT（避免不同幣別被加總在一起）
     if "CURC" in out.columns:

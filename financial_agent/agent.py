@@ -140,6 +140,7 @@ class AgentResponse:
     plotly_jsons: List[str] = field(default_factory=list)  # 互動式 Plotly 圖（FA_PLOTLY 開啟時）
     trace: List[dict] = field(default_factory=list)  # 完整執行軌跡（供下載/優化）
     csv_cache_path: str = ""  # 本輪 Teradata 撈出的大數據落地 CSV 路徑（前端解鎖樞紐/網格）
+    db_row_count: str = ""  # 本輪 DB 查詢撈出的筆數（供精簡回覆用，於收集時就地擷取）
 
 
 def _now_iso() -> str:
@@ -157,11 +158,17 @@ def set_progress_hook(fn) -> None:
 
 
 def _progress(message: str) -> None:
-    """回報一句進度給前端（hook 失敗不影響主流程）。"""
+    """回報一句進度給前端（hook 失敗絕不影響主流程）。
+    刻意連 BaseException 一起吞：Streamlit 在長任務執行中若觸發 rerun/stop，
+    會丟出 RerunException/StopException（屬 BaseException），這類 UI 控制流訊號
+    一旦穿進 agent 就會汙染工具結果（例如被誤記成『工具執行錯誤』）。
+    進度只是顯示，吞掉最安全——被取代的這輪算完即可，Streamlit 自會用新一輪重畫。"""
     if _PROGRESS_HOOK is not None:
         try:
             _PROGRESS_HOOK(message)
-        except Exception:  # noqa: BLE001
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:  # noqa: BLE001  含 Streamlit RerunException/StopException
             pass
 
 
@@ -927,7 +934,10 @@ def run_sql_query(args: dict, file_registry: dict) -> str:
     # 數據隔離核心：完整數據落地本地快取，杜絕 Token 爆炸與 AI 幻覺
     os.makedirs(RUNTIME.cache_dir, exist_ok=True)
     csv_path = _db_csv_path()
-    df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    # Essbase 長表 → 樞紐友善結構：把階層/時間/幣別等複合字串拆成正規維度欄
+    # （ORG_L1.., YEAR/MONTH/MONTH_NO, CURRENCY/UNIT），前端才能真正多維下鑽與正確排序。
+    from essbase import to_pivot_ready
+    to_pivot_ready(df).to_csv(csv_path, index=False, encoding="utf-8-sig")
     print(f"   └─ {len(df)} 筆 → 落地 {csv_path}")
 
     try:
@@ -1435,6 +1445,9 @@ def _gather_evidence(plan: PlanningResult, user_prompt: str,
     evidence: List[str] = []
     tool_used = False
     nudged = False
+    fail_sig: Optional[tuple] = None  # (工具名, 錯誤全文)：追蹤連續相同失敗以便熔斷
+    fail_count = 0
+    aborted = False
 
     for step in range(1, RUNTIME.max_steps + 1):
         print(f"\n  [Gather {step}/{RUNTIME.max_steps}]")
@@ -1495,10 +1508,39 @@ def _gather_evidence(plan: PlanningResult, user_prompt: str,
                 resp.executed_sql.append(args["sql"])
 
             result_str = str(result)
+            # run_sql_query 把 CSV 快取路徑藏在結果尾端（out-of-band metadata）。就地攔下寫進
+            # resp（前端據此解鎖 AgGrid/PivotTableJS 樞紐 Tab），並把標記從結果移除——免得它被
+            # _preview 截斷而遺失，也不讓總結模型看到實體路徑。
+            if _CSV_CACHE_MARKER in result_str:
+                head, _, path = result_str.partition(_CSV_CACHE_MARKER)
+                if path.strip() and not resp.csv_cache_path:
+                    resp.csv_cache_path = path.strip()
+                    m_rows = re.search(r"撈取\s*([\d,]+)\s*筆", head)
+                    resp.db_row_count = m_rows.group(1) if m_rows else ""
+                result_str = head.rstrip()
+
             # 解析類訊息（如「已完成解析」）不算證據，檢索/SQL 結果才收進證據
             if func_name in ("search_knowledge_base", "run_sql_query") or "查詢成功" in result_str:
                 evidence.append(f"【{func_name}｜{args.get('search_query') or args.get('sql') or ''}】\n"
                                 f"{_preview(result_str, 2500)}")
+
+            # 熔斷：同一工具連續吐出「一模一樣」的執行錯誤，代表是環境/系統層問題
+            # （例如前端 UI 競態、驅動缺失），模型再怎麼重試都只會原地打轉。
+            # 第二次就停止收集，把根因寫進證據讓報告誠實說明，
+            # 避免像 kb_uploader key 衝突那次一樣空轉十分鐘還回報「資料不足」。
+            if result_str.startswith("⚠️ 工具執行錯誤"):
+                sig = (func_name, result_str)
+                fail_count = fail_count + 1 if sig == fail_sig else 1
+                fail_sig = sig
+                if fail_count >= 2:
+                    evidence.append(
+                        f"⚠️ 系統錯誤：工具 {func_name} 連續 {fail_count} 次回報相同錯誤，已停止重試。\n"
+                        f"錯誤內容：{_preview(result_str, 600)}\n"
+                        "請在報告中明確說明這是「系統/環境層錯誤」（不是資料不足、也不是查無資料），"
+                        "並提示使用者排除該錯誤後重新查詢。")
+                    aborted = True
+            else:
+                fail_sig, fail_count = None, 0
 
             _trace(resp, "tool_call", step=step, tool=func_name,
                    thought=args.get("thought_process"),
@@ -1512,6 +1554,12 @@ def _gather_evidence(plan: PlanningResult, user_prompt: str,
                 # 完整結果已另存進 evidence 供總結使用。避免 messages 累積爆量拖慢每一步。
                 "content": _preview(result_str, 1200),
             })
+
+        if aborted:
+            print("  └─ ⛔ 偵測到連續相同的工具系統錯誤，熔斷收集迴圈（不再重試）")
+            _trace(resp, "gather_abort", tool=(fail_sig[0] if fail_sig else ""),
+                   reason="repeated_tool_error", error=_preview(fail_sig[1] if fail_sig else "", 300))
+            break
 
     _trace(resp, "gather_done", evidence_count=len(evidence))
     return evidence
@@ -1934,18 +1982,39 @@ def _present_synthesis(synthesis: dict, resp: AgentResponse,
     _trace(resp, "present", tables=len(resp.tables), images=len(resp.images))
 
 
+def _db_pivot_report(resp: AgentResponse) -> str:
+    """資料庫查詢的精簡回覆：報告撈取筆數 + SQL，並把使用者導去前端互動樞紐/網格。
+    完整明細交給 AgGrid/PivotTableJS（資料隔離），不在文字報告裡重述或捏造數據。"""
+    n = resp.db_row_count or "多"
+    sql_note = ""
+    if resp.executed_sql:
+        sql_note = f"\n\n查詢 SQL：\n```sql\n{resp.executed_sql[-1].strip()}\n```"
+    return (
+        f"✅ 已為您從資料庫撈取 **{n} 筆** 明細資料並完成本地快取。\n\n"
+        f"請切換至上方的 **🔀『自由拖拉樞紐分析 (Excel UI)』頁籤（Tab 3）** 進行探索"
+        f"（建議：列＝組織、欄＝月份 `YEAR_MON`、值＝`AMT` 加總、篩選＝`SCENARIO`／`CURC`）；"
+        f"或切到 **🗂️『企業級數據網格 (AgGrid)』** 檢視完整明細與組織層級群組。"
+        f"{sql_note}"
+    )
+
+
 def _execute_tool_loop(plan: PlanningResult, user_prompt: str,
                        file_registry: dict, resp: AgentResponse) -> None:
     """統籌三階段：收集 → 整合 → 視覺化/表格 → 一起呈現。"""
     _progress("📂 解析檔案、收集證據中…")
+    # gather 會在收集時就地把 DB 大數據 CSV 快取路徑寫進 resp.csv_cache_path（前端解鎖樞紐 Tab）
     evidence = gather(plan, user_prompt, file_registry, resp)
 
-    # 數據隔離：從證據裡攔出隱藏的實體 CSV 快取路徑，並把標記從證據移除（總結模型不該看到）
-    for i, ev in enumerate(evidence):
-        if _CSV_CACHE_MARKER in ev:
-            head, _, path = ev.partition(_CSV_CACHE_MARKER)
-            resp.csv_cache_path = path.strip()
-            evidence[i] = head.rstrip()
+    # 資料庫查詢且資料已落地：完整明細由前端 AgGrid/PivotTableJS 互動呈現，
+    # 不該讓總結模型拿 30 筆預覽去「捏造」一張樞紐表（會誤導、又白花 20 多秒）。
+    # 直接給精簡導引，把使用者帶去 Tab 3 自己拖拉樞紐。
+    if plan.intent == IntentType.DATABASE_QUERY and resp.csv_cache_path:
+        report = _db_pivot_report(resp)
+        _trace(resp, "synthesis", model="(skipped: db_pivot)",
+               report_text=_preview(report, 500), chart_count=0, table_count=0)
+        _present_synthesis({"report": report, "charts": [], "tables": []},
+                           resp, file_registry, want_viz=False)
+        return
 
     print("\n  🧩 [Synthesize] 總結 agent 整合證據...")
     _progress("🧩 整合分析、撰寫報告中…（這步較久，請稍候）")

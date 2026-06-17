@@ -157,6 +157,15 @@ if not records or not meta["row"]:
 df = pd.DataFrame.from_records(records)
 row_dim = meta["row"][0]
 col_dims = list(meta["column"]) or ["Column"]   # 一或多個欄維（空則用解析器給的 "Column"）
+_missing = [d for d in col_dims if d not in df.columns]
+if _missing:
+    st.error(
+        f"解析結果缺欄位 {_missing} —— 多半是 **`essbase_grid.py` 版本過舊**"
+        f"（多欄維 Crossjoin 沒被拆成各欄，被塞成單一 'Column'）。\n\n"
+        f"請更新 `financial_agent/essbase_grid.py` 到最新版，並**完整重啟** `streamlit run`"
+        f"（Ctrl+C 後重跑，不是只按 Rerun——Streamlit 不會自動重載已 import 的模組）。\n\n"
+        f"目前 df 實際欄位：`{list(df.columns)}`")
+    st.stop()
 if len(meta["row"]) > 1:
     st.info(f"偵測到多個列維度 {meta['row']}；本頁階層先以第一個「{row_dim}」呈現。")
 if len(col_dims) > 1:

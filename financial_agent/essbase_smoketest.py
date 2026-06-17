@@ -105,7 +105,7 @@ def build_body(mdx: str, format_values: bool = True) -> bytes:
 
 def raw_http_request(url: str, headers: dict[str, str], body: bytes,
                      timeout: int = 120, verify: bool = True,
-                     legacy_tls: bool = False) -> tuple[int, str, str]:
+                     legacy_tls: bool = False, cafile: str | None = None) -> tuple[int, str, str]:
     """不透過 http.client，自己用 socket 送 POST 並讀「整包」回應。
 
     用來應付伺服器回 HTTP/0.9 風格（沒有狀態列/標頭，常見於 Essbase
@@ -133,6 +133,8 @@ def raw_http_request(url: str, headers: dict[str, str], body: bytes,
             if not verify:
                 ctx.check_hostname = False
                 ctx.verify_mode = ssl.CERT_NONE
+            elif cafile:
+                ctx.load_verify_locations(cafile=cafile)
             if legacy_tls:
                 import warnings
                 with warnings.catch_warnings():
@@ -194,7 +196,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("mdx", nargs="?", help="MDX 查詢字串（省略則用 --file 或 DEFAULT_MDX）")
     ap.add_argument("--file", metavar="PATH", help="從檔案讀 MDX")
     ap.add_argument("--timeout", type=int, default=120, help="逾時秒數（預設 120）")
-    ap.add_argument("--insecure", action="store_true", help="跳過 TLS 憑證驗證（自簽用）")
+    ap.add_argument("--insecure", action="store_true", help="跳過 TLS 憑證驗證（自簽用；建議改用 --cafile 較乾淨）")
+    ap.add_argument("--cafile", metavar="PATH", help="用自訂 CA 憑證(PEM)做 TLS 驗證（內部 CA 用，免關驗證）")
     ap.add_argument("--proxy", metavar="URL", help="指定 HTTP(S) Proxy，例：http://proxy:8080")
     ap.add_argument("--proxy-user", metavar="USER", help="Proxy 帳號（Proxy 需認證時；免去把密碼塞進 URL/編碼）")
     ap.add_argument("--proxy-pass", metavar="PWD", help="Proxy 密碼（搭配 --proxy-user）")
@@ -218,6 +221,7 @@ def main(argv: list[str] | None = None) -> int:
     verify = _cfg("FA_ESB_VERIFY_TLS", "1").lower() not in ("0", "false", "no", "off")
     if args.insecure:
         verify = False
+    cafile = args.cafile or _cfg("FA_ESB_CAFILE", "") or None
 
     missing = [n for n, v in (("FA_ESB_URI", base), ("FA_ESB_USER", user),
                               ("FA_ESB_PWD", pwd)) if not v]
@@ -255,6 +259,8 @@ def main(argv: list[str] | None = None) -> int:
     if not verify:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
+    elif cafile:
+        ctx.load_verify_locations(cafile=cafile)
     if args.legacy_tls:
         import warnings
         with warnings.catch_warnings():
@@ -298,7 +304,7 @@ def main(argv: list[str] | None = None) -> int:
                 {"Authorization": f"Basic {token}",
                  "Content-Type": "application/json",
                  "Accept": args.accept},
-                body, timeout=args.timeout, verify=verify, legacy_tls=args.legacy_tls)
+                body, timeout=args.timeout, verify=verify, legacy_tls=args.legacy_tls, cafile=cafile)
         except (OSError, ValueError) as e2:
             if args.debug:
                 import traceback

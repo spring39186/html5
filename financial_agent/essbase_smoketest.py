@@ -12,7 +12,7 @@
               "formatValues":true,"memberIdentifierType":"NAME"}}
 
 設定來源（優先序高→低）：命令列參數 > 環境變數 / .env > 本檔頂端 DEFAULT_* 常數
-    FA_ESB_URI   REST 基底，例：http://host:9001/essbase/rest/v1（9001 多為明文 HTTP；走 TLS 才用 https）
+    FA_ESB_URI   REST 基底，例：https://host:9001/essbase/rest/v1（Essbase 9001 多為 HTTPS；自簽憑證加 --insecure）
     FA_ESB_APP   application name（預設 VEMIS2T）
     FA_ESB_DB    database name （預設 IEMISA）
     FA_ESB_USER  帳號
@@ -46,7 +46,7 @@ import urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # ── 想直接寫死也行（留空就走環境變數 / .env）──────────────────────────────
-DEFAULT_URI = ""              # 例：http://your-host:9001/essbase/rest/v1（9001 常是明文 HTTP；TLS 才用 https）
+DEFAULT_URI = ""              # 例：https://your-host:9001/essbase/rest/v1（Essbase 9001 多為 HTTPS；自簽憑證加 --insecure）
 DEFAULT_APP = "VEMIS2T"
 DEFAULT_DB = "IEMISA"
 DEFAULT_USER = ""
@@ -159,6 +159,13 @@ def raw_http_request(url: str, headers: dict[str, str], body: bytes,
             pass
 
     raw = b"".join(chunks)
+    # 偵測：對 TLS port 送了明文 → 伺服器回的是 TLS record（Alert/Handshake），不是 HTTP
+    if raw[:1] in (b"\x14", b"\x15", b"\x16", b"\x17") and raw[1:2] == b"\x03":
+        rec = {0x14: "ChangeCipherSpec", 0x15: "Alert",
+               0x16: "Handshake", 0x17: "ApplicationData"}.get(raw[0], "?")
+        raise ValueError(
+            f"收到 TLS {rec} record（前幾位元組 {raw[:8].hex()}）而不是 HTTP —— 這個 port 走 HTTPS。"
+            "\n  → 把 FA_ESB_URI 改成 https:// 開頭再試；自簽憑證請加 --insecure（或設 FA_ESB_VERIFY_TLS=0）。")
     if raw[:5] == b"HTTP/":                                  # 正常 HTTP：切出狀態列/標頭/內容
         head, _, body_bytes = raw.partition(b"\r\n\r\n")
         head_lines = head.split(b"\r\n")

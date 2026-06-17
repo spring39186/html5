@@ -103,6 +103,19 @@ def build_body(mdx: str, format_values: bool = True) -> bytes:
     return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
 
+def _apply_cafile(ctx: ssl.SSLContext, cafile: str) -> str | None:
+    """把自訂 CA(PEM) 套到 TLS context；成功回 None，失敗回可讀錯誤訊息（不丟例外）。"""
+    if not os.path.exists(cafile):
+        return f"找不到 CA 檔：{cafile}"
+    try:
+        ctx.load_verify_locations(cafile=cafile)
+        return None
+    except (OSError, ssl.SSLError) as e:
+        return (f"CA 檔無法載入（{e}）：{cafile}\n"
+                "  → 需為 PEM 文字格式（檔內含 -----BEGIN CERTIFICATE-----）；"
+                "若是 .cer/.der 二進位憑證請先轉 PEM，或改用 FA_ESB_VERIFY_TLS=0 / --insecure。")
+
+
 def raw_http_request(url: str, headers: dict[str, str], body: bytes,
                      timeout: int = 120, verify: bool = True,
                      legacy_tls: bool = False, cafile: str | None = None) -> tuple[int, str, str]:
@@ -134,7 +147,9 @@ def raw_http_request(url: str, headers: dict[str, str], body: bytes,
                 ctx.check_hostname = False
                 ctx.verify_mode = ssl.CERT_NONE
             elif cafile:
-                ctx.load_verify_locations(cafile=cafile)
+                _err = _apply_cafile(ctx, cafile)
+                if _err:
+                    raise ValueError(_err)
             if legacy_tls:
                 import warnings
                 with warnings.catch_warnings():
@@ -260,7 +275,10 @@ def main(argv: list[str] | None = None) -> int:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
     elif cafile:
-        ctx.load_verify_locations(cafile=cafile)
+        _err = _apply_cafile(ctx, cafile)
+        if _err:
+            print(f"[設定錯誤] {_err}", file=sys.stderr)
+            return 2
     if args.legacy_tls:
         import warnings
         with warnings.catch_warnings():

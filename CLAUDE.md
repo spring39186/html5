@@ -41,6 +41,33 @@ Future financial-data queries should target the **Essbase multidimensional cube*
 - `financial_agent/tests/test_essbase_client.py` — offline tests (parser/URL/
   config‑gating), pandas‑free.
 
+### Live cube — VERIFIED (smoketest ran, real data returned)
+- `financial_agent/essbase_smoketest.py` — stdlib-only connection probe. Confirmed:
+  the cube is reachable over **HTTPS on :9001** (plain http → server sends a TLS
+  alert), needs `Accept: application/octet-stream` + `format=JSON`; over TLS it
+  returns **standard HTTP/1.1**, so urllib/`requests` parse it directly (a
+  raw-socket fallback for header-less HTTP/0.9 streams exists but isn't needed on
+  the happy path). Flags: `--insecure` / `--cafile` (self-signed CA),
+  `--raw-values` (formatValues off → clean doubles), `--legacy-tls`, `--proxy`.
+- **Real grid shape differs from the offline guess** in
+  `essbase_client.mdx_to_records()`:
+    `metadata.{row,column,page}` = **dimension NAME strings** (not member tuples);
+    `data[0]` = column-member header row (leading `""` per row-dim);
+    `data[i]` = `[<row members…>, <values…>]`.
+  → The CORRECT parser for this real shape now lives in `essbase_grid.py`
+    (`parse_mdx_grid`). When wiring the agent, port THIS, not the old
+    `mdx_to_records` (rework/retire that one).
+
+### Streamlit pivot / hierarchy viz (DONE — demo)
+- `financial_agent/essbase_grid.py` — pure-Python (pandas optional): `parse_mdx_grid`
+  (grid→long records), `load_parent_map`/`member_path`/`aggregate_values`
+  (hierarchy from `essbase_outline_parent_child.csv`), `to_long_df`.
+- `financial_agent/essbase_pivot_app.py` — `streamlit run` app: Plotly
+  treemap/sunburst/icicle + MultiIndex pivot table (+ optional AgGrid tree).
+  Defaults to a built-in SAMPLE (offline) or `Essbase live` (reuses smoketest fetch).
+- `financial_agent/tests/test_essbase_grid.py` — offline tests (6, pass).
+- Next (when asked): wire into agent / `EssbaseClient`.
+
 ### Remaining touchpoints (NOT done — do only when asked)
 - `financial_agent/essbase.py` — `to_pivot_ready` reshaping; can consume
   `mdx_to_long_df()` output once wired.
@@ -49,7 +76,8 @@ Future financial-data queries should target the **Essbase multidimensional cube*
   MSSQL. Swap these to call `EssbaseClient` when migrating the agent.
 - `financial_agent/config.py` — `mcp_args` still defaults to `mcp_server_mssql.py`.
 
-> Status: REST client is scaffolded + tested offline, but **not yet wired into the
-> agent** and **not run against a live cube**. Verify `mdx_to_records()` field
-> mapping against a real response (the Oracle doc page is bot‑blocked, so the grid
-> shape was taken from Oracle's MDX-Provider JSON spec + may vary by version).
+> Status: connection **VERIFIED against the live cube** (smoketest returns real
+> data); the real grid shape is now known and parsed by `essbase_grid.parse_mdx_grid`
+> (the older `essbase_client.mdx_to_records` assumed a different shape — rework when
+> wiring). A Streamlit pivot/treemap demo (`essbase_pivot_app.py`) consumes it.
+> Still **not wired into the agent** (agent.py DB tools untouched — do when asked).

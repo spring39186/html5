@@ -97,6 +97,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", metavar="PATH", default="MDX_Result.txt", help="回應輸出檔（預設 MDX_Result.txt）")
     ap.add_argument("--timeout", type=int, default=120, help="逾時秒數（預設 120）")
     ap.add_argument("--insecure", action="store_true", help="跳過 TLS 憑證驗證（自簽用）")
+    ap.add_argument("--proxy", metavar="URL", help="指定 HTTP(S) Proxy，例：http://proxy:8080")
+    ap.add_argument("--legacy-tls", action="store_true",
+                    help="放寬 TLS（容忍舊版伺服器 / 弱 cipher；解 OpenSSL 比 Windows 嚴的連線中止）")
+    ap.add_argument("--debug", action="store_true", help="失敗時印完整 traceback")
     args = ap.parse_args(argv)
 
     # .env：先載 cwd/.env，再載本檔同層（financial_agent/.env）
@@ -147,9 +151,27 @@ def main(argv: list[str] | None = None) -> int:
     if not verify:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
+    if args.legacy_tls:
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)  # TLSv1 已棄用但這裡刻意允許
+            try:
+                ctx.minimum_version = ssl.TLSVersion.TLSv1       # 容忍 TLS 1.0+
+            except (AttributeError, ValueError):
+                pass
+        try:
+            ctx.set_ciphers("DEFAULT@SECLEVEL=1")                # 放寬 OpenSSL3 安全等級
+        except ssl.SSLError:
+            pass
+
+    # 自訂 opener：HTTPSHandler 套我們的 ctx；--proxy 覆寫系統/環境代理。
+    handlers: list = [urllib.request.HTTPSHandler(context=ctx)]
+    if args.proxy:
+        handlers.append(urllib.request.ProxyHandler({"http": args.proxy, "https": args.proxy}))
+    opener = urllib.request.build_opener(*handlers)
 
     try:
-        with urllib.request.urlopen(req, timeout=args.timeout, context=ctx) as r:
+        with opener.open(req, timeout=args.timeout) as r:
             status = r.status
             ctype = r.headers.get("Content-Type", "")
             text = r.read().decode("utf-8", "replace")
@@ -157,13 +179,20 @@ def main(argv: list[str] | None = None) -> int:
         status = e.code
         ctype = e.headers.get("Content-Type", "") if e.headers else ""
         text = e.read().decode("utf-8", "replace")
-    except urllib.error.URLError as e:                      # 連不到 / DNS / TLS
-        print(f"\n[連線失敗] {e.reason}"
-              "\n  檢查：URL 是否正確、VPN/防火牆、port、TLS（自簽可加 --insecure）。",
-              file=sys.stderr)
-        return 1
-    except (TimeoutError, OSError) as e:
-        print(f"\n[連線失敗] {e}", file=sys.stderr)
+    except (urllib.error.URLError, TimeoutError, OSError) as e:   # 連不到 / DNS / TLS / 連線中止
+        if args.debug:
+            import traceback
+            traceback.print_exc()
+        reason = getattr(e, "reason", e)
+        print(f"\n[連線失敗] {reason}", file=sys.stderr)
+        print(
+            "  你的 VBA 能通、Python 不行 → 多半是 Python 的 TLS/代理跟 Windows(SChannel) 不同：\n"
+            "  1) 公司 Proxy：PowerShell 先 $env:HTTPS_PROXY=\"http://proxy:port\" 再跑，或加 --proxy http://proxy:port\n"
+            "  2) 舊版伺服器/弱加密被 OpenSSL 擋：加 --legacy-tls（必要時再加 --insecure）\n"
+            "  3) 防毒/HTTPS 檢查軟體中止 python.exe：先用 Windows 內建 curl（走 SChannel，同你 VBA）比對：\n"
+            f"       curl.exe -v -k -u 帳號:密碼 \"{base}/applications/{app}/databases/{db}\"\n"
+            "     curl 會通但 Python 不通 → 屬 1)或2)；curl 也被中止 → 屬 3)（找 IT 放行或走 Proxy）。",
+            file=sys.stderr)
         return 1
 
     print(f"\nHTTP {status}   Content-Type: {ctype}   回應長度: {len(text)} bytes")

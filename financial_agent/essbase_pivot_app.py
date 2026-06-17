@@ -1,9 +1,8 @@
 """essbase_pivot_app.py — Essbase 多維度樞紐 / 階層報表（Streamlit）
 ================================================================================
-把 Essbase「Run MDX Query」的回應，畫成主管看得懂的階層報表：
-  • 🌳 Treemap / Sunburst / Icicle（Plotly，開源免授權，用 parent/child 建階層）
-  • 📋 MultiIndex 樞紐表（pandas + st.dataframe，內建縮排階層）
-  • 🌲（選用）AgGrid 可展開/收合樹狀表（treeData 為 AG Grid Enterprise 功能）
+把 Essbase「Run MDX Query」的回應，畫成主管看得懂的階層樞紐報表：
+  • 🌲 AgGrid 可展開/收合樹狀表（預設全展開；treeData 為 AG Grid Enterprise 功能）
+  • 📋 MultiIndex 樞紐表（pandas + st.dataframe，內建縮排階層；免授權，AgGrid 缺了就用它）
 
 執行：
     streamlit run essbase_pivot_app.py
@@ -12,8 +11,8 @@
     內建範例（離線即可看效果）  ←預設
     Essbase live（讀 financial_agent/.env 直接查；建議勾「原始數值」）
 
-相依：streamlit、pandas、plotly（皆已列在 requirements.txt）；
-     AgGrid 樹狀表額外需要 streamlit-aggrid（缺了會自動略過）。
+相依：streamlit、pandas（皆已列在 requirements.txt）；
+     AgGrid 樹狀表額外需要 streamlit-aggrid（缺了自動退回 MultiIndex 表）。
 
 備註：撈數/解析共用 essbase_grid.py 與 essbase_smoketest.py；之後接 agent 時，
       fetch_live() 可換成 EssbaseClient，解析仍走 essbase_grid.parse_mdx_grid()。
@@ -31,7 +30,6 @@ import urllib.error
 import urllib.request
 
 import pandas as pd
-import plotly.express as px
 import streamlit as st
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -110,18 +108,6 @@ def fetch_live(mdx: str, app: str, db: str, raw_values: bool = True) -> dict:
     return json.loads(text)
 
 
-def hierarchy_frame(sub: pd.DataFrame, row_dim: str, pmap: dict) -> pd.DataFrame:
-    """給定已篩到「單一欄組合」的 sub，組出 treemap/sunburst 用的 (成員, 上層, 值)。"""
-    vbm = dict(zip(sub[row_dim], sub["value"]))
-    agg = eg.aggregate_values(vbm, pmap)             # 由下往上加總，保證一致可畫
-    members = list(agg)
-    return pd.DataFrame({
-        "成員": members,
-        "上層": [pmap.get(m, "") if pmap.get(m, "") in agg else "" for m in members],
-        "值": [agg[m] for m in members],
-    })
-
-
 # ════════════════════════════════════════════════════════════════════════════
 st.set_page_config(page_title="Essbase 樞紐分析", layout="wide")
 st.title("📊 Essbase 多維度樞紐分析")
@@ -190,75 +176,60 @@ if not pmap:
         f"它在 **repo 根目錄**（`financial_agent` 的上一層）。請確認有 `git pull` 整個 repo，"
         f"或直接把該檔放到 `{HERE}` 也可以。")
 
-tab_viz, tab_tbl = st.tabs(["🌳 階層視覺化", "📋 樞紐表"])
+st.subheader("📋 階層樞紐表")
 
-# ── 🌳 視覺化 ───────────────────────────────────────────────────────────────
-with tab_viz:
-    st.markdown("**選每個欄維各一個成員，畫該「格」的部門階層：**")
-    pick_cols = st.columns(len(col_dims) + 1)
-    sub = view
-    for i, d in enumerate(col_dims):
-        opts = sorted(view[d].dropna().astype(str).unique().tolist())
-        if opts:
-            m = pick_cols[i].selectbox(d, opts, key=f"pick_{d}")
-            sub = sub[sub[d] == m]
-    chart = pick_cols[-1].radio("圖型", ["Treemap", "Sunburst", "Icicle"], horizontal=True)
-    tdf = hierarchy_frame(sub, row_dim, pmap)
-    if float(tdf["值"].fillna(0).abs().sum()) == 0:
-        st.info("這個組合全是 #Missing／0，沒有可畫的值——換一個 Time／Scenario 組合試試。")
-    else:
-        plotter = {"Treemap": px.treemap, "Sunburst": px.sunburst, "Icicle": px.icicle}[chart]
-        fig = plotter(tdf, names="成員", parents="上層", values="值", branchvalues="total")
-        fig.update_traces(textinfo="label+value+percent parent")
-        fig.update_layout(margin=dict(t=30, l=0, r=0, b=0), height=620)
-        st.plotly_chart(fig, use_container_width=True)
-    st.caption("數值由下往上加總（葉→父），階層比例一定一致。")
+# 列：用祖先路徑做 MultiIndex（縮排階層）；欄：所有欄維（多維 → MultiIndex 欄）
+members = view[row_dim].unique().tolist()
+paths = {m: eg.member_path(m, pmap) for m in members}
+maxd = max((len(p) for p in paths.values()), default=1)
+rows_out = []
+for _, r in view.iterrows():
+    levels = paths[r[row_dim]] + [""] * (maxd - len(paths[r[row_dim]]))
+    rec = {f"L{i}": levels[i] for i in range(maxd)}
+    for d in col_dims:
+        rec[d] = r[d]
+    rec["value"] = r["value"]
+    rows_out.append(rec)
+pivot = (pd.DataFrame(rows_out)
+         .pivot_table(index=[f"L{i}" for i in range(maxd)],
+                      columns=col_dims, values="value", aggfunc="sum"))
+_fmt = "{:,.0f}"
 
-# ── 📋 樞紐表 ───────────────────────────────────────────────────────────────
-with tab_tbl:
-    # 用每個成員的祖先路徑做 MultiIndex → 內建縮排階層
-    members = view[row_dim].unique().tolist()
-    paths = {m: eg.member_path(m, pmap) for m in members}
-    maxd = max((len(p) for p in paths.values()), default=1)
-    rows_out = []
-    for _, r in view.iterrows():
-        levels = paths[r[row_dim]] + [""] * (maxd - len(paths[r[row_dim]]))
-        rec = {f"L{i}": levels[i] for i in range(maxd)}
-        for d in col_dims:
-            rec[d] = r[d]
-        rec["value"] = r["value"]
-        rows_out.append(rec)
-    pivot = (pd.DataFrame(rows_out)
-             .pivot_table(index=[f"L{i}" for i in range(maxd)],
-                          columns=col_dims, values="value", aggfunc="sum"))
-    st.dataframe(pivot.style.format("{:,.0f}", na_rep="—"), use_container_width=True)
-
-    if _HAS_AGGRID:
-        with st.expander("🌲 AgGrid 可展開樹狀表（treeData 為 AG Grid Enterprise 功能）"):
-            try:
-                wide = view.pivot_table(index=row_dim, columns=col_dims,
-                                        values="value", aggfunc="sum")
-                wide.columns = ["｜".join(map(str, c)) if isinstance(c, tuple) else str(c)
-                                for c in wide.columns]
-                wide = wide.reset_index()
-                # path 存成「分隔字串」(用 US 控制字元 \x1f)，JS 端再 split 回陣列；
-                # 直接塞 list 會被序列化成字串，AgGrid 對它呼叫 .join() → "i.join is not a function"
-                wide["path"] = wide[row_dim].map(
-                    lambda m: chr(31).join(eg.member_path(m, pmap)))
-                gob = GridOptionsBuilder.from_dataframe(wide.drop(columns=[row_dim, "path"]))
-                opts = gob.build()
-                opts["treeData"] = True
-                opts["getDataPath"] = JsCode(
-                    "function(d){return String(d.path).split(String.fromCharCode(31));}")
-                opts["autoGroupColumnDef"] = {
-                    "headerName": row_dim,
-                    "cellRendererParams": {"suppressCount": True}}
-                AgGrid(wide, gridOptions=opts, allow_unsafe_jscode=True,
-                       enable_enterprise_modules=True, height=420)
-            except Exception as e:                     # noqa: BLE001
-                st.info(f"AgGrid 樹狀表略過：{e}")
-    else:
-        st.caption("想要可展開/收合的樹狀表：`pip install streamlit-aggrid`")
+if _HAS_AGGRID:
+    # 可展開/收合的樹狀表，預設全展開（treeData 為 AG Grid Enterprise 功能）
+    try:
+        wide = view.pivot_table(index=row_dim, columns=col_dims,
+                                values="value", aggfunc="sum")
+        wide.columns = ["｜".join(map(str, c)) if isinstance(c, tuple) else str(c)
+                        for c in wide.columns]
+        wide = wide.reset_index()
+        # path 存成「分隔字串」(US 控制字元 \x1f)，JS 端再 split 回陣列；直接塞 list 會被
+        # 序列化成字串，AgGrid 對它呼叫 .join() → "i.join is not a function"
+        wide["path"] = wide[row_dim].map(lambda m: chr(31).join(eg.member_path(m, pmap)))
+        gob = GridOptionsBuilder.from_dataframe(wide.drop(columns=[row_dim, "path"]))
+        gob.configure_default_column(valueFormatter=JsCode(
+            "function(p){return p.value==null?'':"
+            "(typeof p.value==='number'?p.value.toLocaleString():p.value);}"))
+        opts = gob.build()
+        opts["treeData"] = True
+        opts["groupDefaultExpanded"] = -1          # ← 預設全部展開
+        opts["getDataPath"] = JsCode(
+            "function(d){return String(d.path).split(String.fromCharCode(31));}")
+        opts["autoGroupColumnDef"] = {
+            "headerName": row_dim, "minWidth": 240, "pinned": "left",
+            "cellRendererParams": {"suppressCount": True}}
+        AgGrid(wide, gridOptions=opts, allow_unsafe_jscode=True,
+               enable_enterprise_modules=True, height=600)
+        st.caption("預設全展開；點各列左側箭頭可收合。"
+                   "（treeData 為 AG Grid Enterprise 功能，正式上線需授權）")
+    except Exception as e:                          # noqa: BLE001
+        st.info(f"AgGrid 失敗，改用純表格：{e}")
+        st.dataframe(pivot.style.format(_fmt, na_rep="—"), use_container_width=True)
+    with st.expander("🔢 純表格樞紐（MultiIndex，免授權）"):
+        st.dataframe(pivot.style.format(_fmt, na_rep="—"), use_container_width=True)
+else:
+    st.dataframe(pivot.style.format(_fmt, na_rep="—"), use_container_width=True)
+    st.caption("想要可展開/收合的樹狀表：`pip install streamlit-aggrid`")
 
 with st.expander("🔎 原始長表 / JSON（debug）"):
     st.dataframe(view, use_container_width=True)

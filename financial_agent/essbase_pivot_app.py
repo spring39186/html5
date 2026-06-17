@@ -110,10 +110,8 @@ def fetch_live(mdx: str, app: str, db: str, raw_values: bool = True) -> dict:
     return json.loads(text)
 
 
-def hierarchy_frame(df: pd.DataFrame, row_dim: str, col_dim: str,
-                    value_member: str, pmap: dict) -> pd.DataFrame:
-    """給定一個欄成員（如 NTD K），組出 treemap/sunburst 用的 (成員, 上層, 值)。"""
-    sub = df[df[col_dim] == value_member]
+def hierarchy_frame(sub: pd.DataFrame, row_dim: str, pmap: dict) -> pd.DataFrame:
+    """給定已篩到「單一欄組合」的 sub，組出 treemap/sunburst 用的 (成員, 上層, 值)。"""
     vbm = dict(zip(sub[row_dim], sub["value"]))
     agg = eg.aggregate_values(vbm, pmap)             # 由下往上加總，保證一致可畫
     members = list(agg)
@@ -158,23 +156,23 @@ if not records or not meta["row"]:
 
 df = pd.DataFrame.from_records(records)
 row_dim = meta["row"][0]
-col_dims = meta["column"]
-if len(col_dims) <= 1:
-    col_dim = col_dims[0] if col_dims else "Column"
-else:                                   # Crossjoin 多欄維 → 合成一個複合欄
-    col_dim = "｜".join(col_dims)
-    df[col_dim] = df[col_dims].astype(str).apply(lambda r: "｜".join(r), axis=1)
-    st.info(f"欄為多維 Crossjoin {col_dims}，已合成複合欄「{col_dim}」。")
+col_dims = list(meta["column"]) or ["Column"]   # 一或多個欄維（空則用解析器給的 "Column"）
 if len(meta["row"]) > 1:
     st.info(f"偵測到多個列維度 {meta['row']}；本頁階層先以第一個「{row_dim}」呈現。")
+if len(col_dims) > 1:
+    st.info(f"欄為多維 Crossjoin {col_dims}；下面每個欄維各有獨立篩選器。")
 
 if meta["page"]:
     st.caption("🔒 固定維度（slicer，取頂層成員）： " + " · ".join(meta["page"]))
 
-# 欄成員（如幣別）篩選
-col_members = sorted(df[col_dim].dropna().astype(str).unique().tolist())
-sel = st.sidebar.multiselect(col_dim, col_members, default=col_members)
-view = df[df[col_dim].isin(sel)] if sel else df
+# ── 側邊欄：每個欄維各一個篩選器（多維 Crossjoin 也好操作）──
+st.sidebar.header("欄維篩選")
+view = df
+for d in col_dims:
+    opts = sorted(df[d].dropna().astype(str).unique().tolist())
+    chosen = st.sidebar.multiselect(d, opts, default=opts, key=f"filt_{d}")
+    if chosen:
+        view = view[view[d].isin(chosen)]
 
 pmap = eg.load_parent_map(dimension=row_dim)
 if not pmap:
@@ -187,16 +185,25 @@ tab_viz, tab_tbl = st.tabs(["🌳 階層視覺化", "📋 樞紐表"])
 
 # ── 🌳 視覺化 ───────────────────────────────────────────────────────────────
 with tab_viz:
-    c1, c2 = st.columns([1, 1])
-    value_member = c1.selectbox(f"{col_dim}（取哪個值畫圖）", col_members, index=0)
-    chart = c2.radio("圖型", ["Treemap", "Sunburst", "Icicle"], horizontal=True)
-    tdf = hierarchy_frame(df, row_dim, col_dim, value_member, pmap)
-    plotter = {"Treemap": px.treemap, "Sunburst": px.sunburst, "Icicle": px.icicle}[chart]
-    fig = plotter(tdf, names="成員", parents="上層", values="值", branchvalues="total")
-    fig.update_traces(textinfo="label+value+percent parent")
-    fig.update_layout(margin=dict(t=30, l=0, r=0, b=0), height=620)
-    st.plotly_chart(fig, use_container_width=True)
-    st.caption("數值由下往上加總（葉→父），所以階層比例一定一致。")
+    st.markdown("**選每個欄維各一個成員，畫該「格」的部門階層：**")
+    pick_cols = st.columns(len(col_dims) + 1)
+    sub = view
+    for i, d in enumerate(col_dims):
+        opts = sorted(view[d].dropna().astype(str).unique().tolist())
+        if opts:
+            m = pick_cols[i].selectbox(d, opts, key=f"pick_{d}")
+            sub = sub[sub[d] == m]
+    chart = pick_cols[-1].radio("圖型", ["Treemap", "Sunburst", "Icicle"], horizontal=True)
+    tdf = hierarchy_frame(sub, row_dim, pmap)
+    if float(tdf["值"].fillna(0).abs().sum()) == 0:
+        st.info("這個組合全是 #Missing／0，沒有可畫的值——換一個 Time／Scenario 組合試試。")
+    else:
+        plotter = {"Treemap": px.treemap, "Sunburst": px.sunburst, "Icicle": px.icicle}[chart]
+        fig = plotter(tdf, names="成員", parents="上層", values="值", branchvalues="total")
+        fig.update_traces(textinfo="label+value+percent parent")
+        fig.update_layout(margin=dict(t=30, l=0, r=0, b=0), height=620)
+        st.plotly_chart(fig, use_container_width=True)
+    st.caption("數值由下往上加總（葉→父），階層比例一定一致。")
 
 # ── 📋 樞紐表 ───────────────────────────────────────────────────────────────
 with tab_tbl:
@@ -208,19 +215,23 @@ with tab_tbl:
     for _, r in view.iterrows():
         levels = paths[r[row_dim]] + [""] * (maxd - len(paths[r[row_dim]]))
         rec = {f"L{i}": levels[i] for i in range(maxd)}
-        rec[col_dim] = r[col_dim]
+        for d in col_dims:
+            rec[d] = r[d]
         rec["value"] = r["value"]
         rows_out.append(rec)
     pivot = (pd.DataFrame(rows_out)
              .pivot_table(index=[f"L{i}" for i in range(maxd)],
-                          columns=col_dim, values="value", aggfunc="sum"))
+                          columns=col_dims, values="value", aggfunc="sum"))
     st.dataframe(pivot.style.format("{:,.0f}", na_rep="—"), use_container_width=True)
 
     if _HAS_AGGRID:
         with st.expander("🌲 AgGrid 可展開樹狀表（treeData 為 AG Grid Enterprise 功能）"):
             try:
-                wide = (view.pivot_table(index=row_dim, columns=col_dim,
-                                         values="value", aggfunc="sum").reset_index())
+                wide = view.pivot_table(index=row_dim, columns=col_dims,
+                                        values="value", aggfunc="sum")
+                wide.columns = ["｜".join(map(str, c)) if isinstance(c, tuple) else str(c)
+                                for c in wide.columns]
+                wide = wide.reset_index()
                 # path 存成「分隔字串」(用 US 控制字元 \x1f)，JS 端再 split 回陣列；
                 # 直接塞 list 會被序列化成字串，AgGrid 對它呼叫 .join() → "i.join is not a function"
                 wide["path"] = wide[row_dim].map(

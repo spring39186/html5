@@ -25,6 +25,7 @@
     python essbase_smoketest.py --file my.mdx                    # MDX 讀檔
     python essbase_smoketest.py --out D:/MDX_Result.txt          # 指定輸出檔
     python essbase_smoketest.py --insecure                       # 跳過 TLS 驗證
+    python essbase_smoketest.py --accept text/html               # 回應改 HTML 串流（octet-stream/text/html 為官方支援格式）
 
 ⚠ 同你 VBA 的註解：MDX 內 FROM ApplicationName.DatabaseName 要與 URL 的 app/db 一致。
 """
@@ -33,11 +34,14 @@ from __future__ import annotations
 
 import argparse
 import base64
+import http.client
 import json
 import os
+import socket
 import ssl
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -95,6 +99,85 @@ def build_body(mdx: str) -> bytes:
     return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
 
+def raw_http_request(url: str, headers: dict[str, str], body: bytes,
+                     timeout: int = 120, verify: bool = True,
+                     legacy_tls: bool = False) -> tuple[int, str, str]:
+    """不透過 http.client，自己用 socket 送 POST 並讀「整包」回應。
+
+    用來應付伺服器回 HTTP/0.9 風格（沒有狀態列/標頭，常見於 Essbase
+    Accept: application/octet-stream 串流）導致標準函式庫 BadStatusLine 的情況——
+    就是 curl 要加 --http0.9 才讀得到的那種回應。
+    回傳 (status, content_type, text)；若回應完全沒有 HTTP 標頭，status 視為 200。
+    註：此路徑為「直連」，不套用 --proxy（你實測的 curl 也是直連）。
+    """
+    parts = urllib.parse.urlsplit(url)
+    scheme = parts.scheme or "http"
+    host = parts.hostname or ""
+    port = parts.port or (443 if scheme == "https" else 80)
+    path = parts.path + (f"?{parts.query}" if parts.query else "")
+    host_hdr = f"{host}:{port}" if parts.port else host
+
+    lines = [f"POST {path} HTTP/1.1", f"Host: {host_hdr}", "Connection: close"]
+    lines += [f"{k}: {v}" for k, v in headers.items()]
+    lines.append(f"Content-Length: {len(body)}")
+    raw_req = ("\r\n".join(lines) + "\r\n\r\n").encode("utf-8") + body
+
+    sock = socket.create_connection((host, port), timeout=timeout)
+    try:
+        if scheme == "https":
+            ctx = ssl.create_default_context()
+            if not verify:
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+            if legacy_tls:
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", DeprecationWarning)
+                    try:
+                        ctx.minimum_version = ssl.TLSVersion.TLSv1
+                    except (AttributeError, ValueError):
+                        pass
+                try:
+                    ctx.set_ciphers("DEFAULT@SECLEVEL=1")
+                except ssl.SSLError:
+                    pass
+            sock = ctx.wrap_socket(sock, server_hostname=host)
+        sock.sendall(raw_req)
+        sock.settimeout(timeout)
+        chunks: list[bytes] = []
+        while True:
+            try:
+                buf = sock.recv(65536)
+            except TimeoutError:
+                break
+            if not buf:                                     # 對方關閉連線 → 讀完
+                break
+            chunks.append(buf)
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    raw = b"".join(chunks)
+    if raw[:5] == b"HTTP/":                                  # 正常 HTTP：切出狀態列/標頭/內容
+        head, _, body_bytes = raw.partition(b"\r\n\r\n")
+        head_lines = head.split(b"\r\n")
+        bits = head_lines[0].decode("latin-1", "replace").split(None, 2)
+        status = int(bits[1]) if len(bits) >= 2 and bits[1].isdigit() else 0
+        ctype = ""
+        for hl in head_lines[1:]:
+            if hl.lower().startswith(b"content-type:"):
+                ctype = hl.split(b":", 1)[1].strip().decode("latin-1", "replace")
+                break
+        text = body_bytes.decode("utf-8", "replace")
+    else:                                                   # HTTP/0.9：整包都是 body
+        status = 200
+        ctype = "(無 HTTP 標頭 / HTTP-0.9 串流)"
+        text = raw.decode("utf-8", "replace")
+    return status, ctype, text
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="單獨測 Essbase REST MDX 連線")
     ap.add_argument("mdx", nargs="?", help="MDX 查詢字串（省略則用 --file 或 DEFAULT_MDX）")
@@ -107,6 +190,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--proxy-pass", metavar="PWD", help="Proxy 密碼（搭配 --proxy-user）")
     ap.add_argument("--legacy-tls", action="store_true",
                     help="放寬 TLS（容忍舊版伺服器 / 弱 cipher；解 OpenSSL 比 Windows 嚴的連線中止）")
+    ap.add_argument("--accept", metavar="MIME", default="application/octet-stream",
+                    help="Accept 標頭（預設 application/octet-stream，與 VBA 一致；可試 application/json）")
     ap.add_argument("--debug", action="store_true", help="失敗時印完整 traceback")
     args = ap.parse_args(argv)
 
@@ -151,7 +236,7 @@ def main(argv: list[str] | None = None) -> int:
 
     req = urllib.request.Request(url, data=body, method="POST")
     req.add_header("Content-Type", "application/json")
-    req.add_header("Accept", "application/octet-stream")  # 與你 VBA 一致
+    req.add_header("Accept", args.accept)  # 預設與你 VBA 一致（application/octet-stream）
     req.add_header("Authorization", f"Basic {token}")
 
     ctx = ssl.create_default_context()
@@ -191,6 +276,23 @@ def main(argv: list[str] | None = None) -> int:
         status = e.code
         ctype = e.headers.get("Content-Type", "") if e.headers else ""
         text = e.read().decode("utf-8", "replace")
+    except http.client.HTTPException as e:                  # 回應無標準 HTTP 標頭(BadStatusLine/HTTP-0.9)
+        print(f"\n[note] 標準 HTTP 解析失敗（{type(e).__name__}: {e!r}）"
+              "\n  → 伺服器回應沒有 HTTP 狀態列/標頭（HTTP/0.9 風格，就是 curl 要加 --http0.9 的原因），"
+              "\n    改用 raw socket 直接讀整包回應…", file=sys.stderr)
+        try:
+            status, ctype, text = raw_http_request(
+                url,
+                {"Authorization": f"Basic {token}",
+                 "Content-Type": "application/json",
+                 "Accept": args.accept},
+                body, timeout=args.timeout, verify=verify, legacy_tls=args.legacy_tls)
+        except (OSError, ValueError) as e2:
+            if args.debug:
+                import traceback
+                traceback.print_exc()
+            print(f"\n[連線失敗-raw] {e2}", file=sys.stderr)
+            return 1
     except (urllib.error.URLError, TimeoutError, OSError) as e:   # 連不到 / DNS / TLS / 連線中止
         if args.debug:
             import traceback
@@ -223,7 +325,13 @@ def main(argv: list[str] | None = None) -> int:
     print(snippet + ("…" if len(pretty) > 800 else ""))
 
     if status == 200:
-        print("\n✅ 連線 / 認證 OK，且伺服器有回應。")
+        # 官方文件：這是 streaming API，即使 200 也可能在內容夾帶 errorMessage
+        if "errorMessage" in text:
+            print("\n⚠ HTTP 200，但回應含 errorMessage —— 串流 API 即使 200 也可能失敗。"
+                  "\n  請看上方/輸出檔的 errorMessage（常見：MDX 語法、成員名稱、FROM App.Db、權限）。",
+                  file=sys.stderr)
+            return 1
+        print("\n✅ 連線 / 認證 OK，且伺服器有回應（未見 errorMessage）。")
         return 0
     if status in (401, 403):
         print("\n❌ 認證/授權失敗：請確認帳號密碼與該帳號對 cube 的權限。", file=sys.stderr)

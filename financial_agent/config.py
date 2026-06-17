@@ -125,6 +125,22 @@ class RuntimeConfig:
         """連線三要素都有才算設定完成（否則 run_sql_query 直接回明確錯誤、不亂連）。"""
         return bool(self.td_dbcname and self.td_uid and self.td_pwd)
 
+    # ── Essbase REST API（MDX 查詢；逐步取代上面的 Teradata 路徑）連線 ──
+    # 機密一律放 .env 或真實環境變數，勿寫進程式碼。五要素：URI/APP/DB/USER/PWD。
+    esb_uri: str = os.getenv("FA_ESB_URI", "")    # REST 基底，例：https://host:9001/essbase/rest/v1
+    esb_app: str = os.getenv("FA_ESB_APP", "")    # application name
+    esb_db: str = os.getenv("FA_ESB_DB", "")      # database (cube) name
+    esb_user: str = os.getenv("FA_ESB_USER", "")  # user name
+    esb_pwd: str = os.getenv("FA_ESB_PWD", "")    # user password
+    esb_verify_tls: bool = _bool_env("FA_ESB_VERIFY_TLS", "1")  # 自簽憑證可設 0 跳過驗證
+    esb_timeout: int = int(os.getenv("FA_ESB_TIMEOUT", "120"))  # 單次 MDX 請求逾時（秒）
+
+    @property
+    def esb_configured(self) -> bool:
+        """五要素齊全才算設定完成（否則 EssbaseClient 直接回明確錯誤、不亂連）。"""
+        return bool(self.esb_uri and self.esb_app and self.esb_db
+                    and self.esb_user and self.esb_pwd)
+
 
 MODEL_CONFIG = ModelConfig()
 RUNTIME = RuntimeConfig()

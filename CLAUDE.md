@@ -27,13 +27,29 @@ Future financial-data queries should target the **Essbase multidimensional cube*
   were **collapsed** (leaf members not captured). Collapsed nodes are marked
   `collapsed:N` in both files — see them before assuming a member list is complete.
 
-### Current code touchpoints to change when switching the backend
-- `financial_agent/essbase.py` — `to_pivot_ready` / pivot reshaping of the Essbase
-  long table; already Essbase-aware.
-- `financial_agent/agent.py` — DB schema tool (~L836) currently describes a
-  "Teradata（Essbase 多維寬表）" structure; the DB-query tool (~L2279) targets MSSQL.
-- `financial_agent/config.py` — `mcp_args` defaults to `mcp_server_mssql.py`
-  (the MSSQL MCP server). Essbase access will replace/supplement this.
+### Essbase REST client (scaffold — DONE)
+- `financial_agent/essbase_client.py` — **`EssbaseClient`** wraps the Essbase 21c
+  REST endpoint `POST {base}/applications/{app}/databases/{db}/mdx?format=JSON`
+  (HTTP Basic auth). `execute_mdx()` returns raw JSON; `mdx_to_records()` /
+  `mdx_to_long_df()` flatten the grid (`metadata.{page,column,row}` + `data`) to a
+  tidy long table. Reads `FA_ESB_*` from `.env` via `config.RUNTIME` (lazy
+  `requests` import; CLI `python essbase_client.py [MDX] [--raw|--csv]`).
+- `financial_agent/config.py` — added `esb_uri/app/db/user/pwd/verify_tls/timeout`
+  + `esb_configured` (mirrors the `td_*` block).
+- `financial_agent/.env` — `FA_ESB_*` commented placeholders (tracked file = no
+  secrets; real values go in a local .env or real env vars).
+- `financial_agent/tests/test_essbase_client.py` — offline tests (parser/URL/
+  config‑gating), pandas‑free.
 
-> Note: nothing was migrated yet — this is a recorded intent + the extracted
-> outline. Do the actual Teradata→Essbase code switch only when asked.
+### Remaining touchpoints (NOT done — do only when asked)
+- `financial_agent/essbase.py` — `to_pivot_ready` reshaping; can consume
+  `mdx_to_long_df()` output once wired.
+- `financial_agent/agent.py` — DB schema tool (~L836) still describes the
+  "Teradata（Essbase 多維寬表）" structure; DB-query tool (~L2279) still targets
+  MSSQL. Swap these to call `EssbaseClient` when migrating the agent.
+- `financial_agent/config.py` — `mcp_args` still defaults to `mcp_server_mssql.py`.
+
+> Status: REST client is scaffolded + tested offline, but **not yet wired into the
+> agent** and **not run against a live cube**. Verify `mdx_to_records()` field
+> mapping against a real response (the Oracle doc page is bot‑blocked, so the grid
+> shape was taken from Oracle's MDX-Provider JSON spec + may vary by version).

@@ -23,7 +23,6 @@
     python essbase_smoketest.py                                  # 用 DEFAULT_MDX
     python essbase_smoketest.py "SELECT {} ON COLUMNS FROM VEMIS2T.IEMISA"
     python essbase_smoketest.py --file my.mdx                    # MDX 讀檔
-    python essbase_smoketest.py --out D:/MDX_Result.txt          # 指定輸出檔
     python essbase_smoketest.py --insecure                       # 跳過 TLS 驗證
     python essbase_smoketest.py --accept text/html               # 回應改 HTML 串流（octet-stream/text/html 為官方支援格式）
 
@@ -182,7 +181,6 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="單獨測 Essbase REST MDX 連線")
     ap.add_argument("mdx", nargs="?", help="MDX 查詢字串（省略則用 --file 或 DEFAULT_MDX）")
     ap.add_argument("--file", metavar="PATH", help="從檔案讀 MDX")
-    ap.add_argument("--out", metavar="PATH", default="MDX_Result.txt", help="回應輸出檔（預設 MDX_Result.txt）")
     ap.add_argument("--timeout", type=int, default=120, help="逾時秒數（預設 120）")
     ap.add_argument("--insecure", action="store_true", help="跳過 TLS 憑證驗證（自簽用）")
     ap.add_argument("--proxy", metavar="URL", help="指定 HTTP(S) Proxy，例：http://proxy:8080")
@@ -311,24 +309,16 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"\nHTTP {status}   Content-Type: {ctype}   回應長度: {len(text)} bytes")
 
-    # 與你 VBA 一樣：把 '],[' 換行，存檔後較好讀
+    # 完整接收後，把 '],[' 換行讓表格較好讀，直接整包印出（不另存檔）
     pretty = text.replace("],[", "]," + "\n" + "[")
-    try:
-        with open(args.out, "w", encoding="utf-8") as f:
-            f.write(pretty)
-        print(f"完整回應已存：{os.path.abspath(args.out)}")
-    except OSError as e:
-        print(f"[寫檔失敗] {e}（仍印出片段於下）", file=sys.stderr)
-
-    snippet = pretty[:800]
-    print("\n--- 回應前 800 字 ---")
-    print(snippet + ("…" if len(pretty) > 800 else ""))
+    print("\n--- 完整回應 ---")
+    print(pretty)
 
     if status == 200:
         # 官方文件：這是 streaming API，即使 200 也可能在內容夾帶 errorMessage
         if "errorMessage" in text:
             print("\n⚠ HTTP 200，但回應含 errorMessage —— 串流 API 即使 200 也可能失敗。"
-                  "\n  請看上方/輸出檔的 errorMessage（常見：MDX 語法、成員名稱、FROM App.Db、權限）。",
+                  "\n  請看上方完整回應的 errorMessage（常見：MDX 語法、成員名稱、FROM App.Db、權限）。",
                   file=sys.stderr)
             return 1
         print("\n✅ 連線 / 認證 OK，且伺服器有回應（未見 errorMessage）。")

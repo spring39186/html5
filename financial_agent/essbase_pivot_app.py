@@ -158,7 +158,13 @@ if not records or not meta["row"]:
 
 df = pd.DataFrame.from_records(records)
 row_dim = meta["row"][0]
-col_dim = meta["column"][0] if meta["column"] else "Column"
+col_dims = meta["column"]
+if len(col_dims) <= 1:
+    col_dim = col_dims[0] if col_dims else "Column"
+else:                                   # Crossjoin 多欄維 → 合成一個複合欄
+    col_dim = "｜".join(col_dims)
+    df[col_dim] = df[col_dims].astype(str).apply(lambda r: "｜".join(r), axis=1)
+    st.info(f"欄為多維 Crossjoin {col_dims}，已合成複合欄「{col_dim}」。")
 if len(meta["row"]) > 1:
     st.info(f"偵測到多個列維度 {meta['row']}；本頁階層先以第一個「{row_dim}」呈現。")
 
@@ -234,5 +240,6 @@ with tab_tbl:
     else:
         st.caption("想要可展開/收合的樹狀表：`pip install streamlit-aggrid`")
 
-with st.expander("🔎 原始長表（debug）"):
+with st.expander("🔎 原始長表 / JSON（debug）"):
     st.dataframe(view, use_container_width=True)
+    st.json(payload)

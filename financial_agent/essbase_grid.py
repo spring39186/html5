@@ -79,18 +79,25 @@ def parse_mdx_grid(payload: dict) -> tuple[list[dict], dict]:
     if not data:
         return records, meta
 
-    header = data[0]
-    col_members = [str(x) for x in header[n_row:]]   # 去掉前面 n_row 個空格
-    # 欄維名：單欄維就用該維名當欄位名，多欄維則統一叫 'Column'
-    col_key = col_dims[0] if len(col_dims) == 1 else "Column"
+    # 欄標頭列數 = 欄維數（至少 1）。Crossjoin 多欄維時，data 前面數列都是標頭，
+    # 每一列對應一個欄維、給出該欄維在每個輸出欄的成員。
+    n_head = min(len(col_dims) or 1, len(data))
+    col_headers = [row[n_row:] for row in data[:n_head]]      # 每欄維一列標頭（去掉前 n_row 空格）
+    num_cols = min((len(h) for h in col_headers), default=0)
+    # 每個輸出欄 = 跨各欄維的成員 tuple，例如 (2018Q1, Actual)
+    col_tuples = [tuple(h[j] for h in col_headers) for j in range(num_cols)]
 
-    for drow in data[1:]:
+    for drow in data[n_head:]:
         row_members = [str(x) for x in drow[:n_row]]
         values = drow[n_row:]
         base = {row_dims[i]: row_members[i] for i in range(n_row)}
-        for j, cm in enumerate(col_members):
+        for j, ctup in enumerate(col_tuples):
             rec = dict(base)
-            rec[col_key] = cm
+            if col_dims:
+                for d, dim in enumerate(col_dims):
+                    rec[dim] = str(ctup[d]) if d < len(ctup) else ""
+            else:
+                rec["Column"] = str(ctup[0]) if ctup else ""
             rec["value"] = _to_num(values[j]) if j < len(values) else None
             records.append(rec)
     return records, meta

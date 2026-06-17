@@ -66,6 +66,28 @@ def test_parse_empty_and_num() -> None:
     assert _to_num(7) == 7.0
 
 
+def test_parse_crossjoin_two_col_dims() -> None:
+    # Crossjoin 讓欄軸有兩個維度 → data 前兩列都是標頭
+    sim = {
+        "metadata": {"page": ["Measure"], "column": ["Time", "Scenario"],
+                     "row": ["Sector Total"]},
+        "data": [
+            ["", "2018Q1", "2018Q1", "2018Q2"],     # Time 標頭
+            ["", "Actual", "Draft", "Actual"],       # Scenario 標頭
+            ["Sector Total", "10", "11", "12"],
+            ["Assy", "4", "5", "6"],
+        ],
+    }
+    recs, meta = parse_mdx_grid(sim)
+    assert meta["column"] == ["Time", "Scenario"]
+    assert len(recs) == 6                            # 2 列成員 × 3 欄
+    assert set(recs[0].keys()) == {"Sector Total", "Time", "Scenario", "value"}
+    by = {(r["Sector Total"], r["Time"], r["Scenario"]): r["value"] for r in recs}
+    assert by[("Sector Total", "2018Q1", "Actual")] == 10.0
+    assert by[("Sector Total", "2018Q1", "Draft")] == 11.0
+    assert by[("Assy", "2018Q2", "Actual")] == 6.0
+
+
 def test_parent_map_and_path() -> None:
     pm = load_parent_map(dimension="Sector Total")
     # 至少要有頂層與第一層

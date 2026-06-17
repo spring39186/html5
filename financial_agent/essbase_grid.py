@@ -24,9 +24,24 @@ import os
 from typing import Any
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-# parent/child 建檔在 repo 根（financial_agent 的上一層）
-DEFAULT_PARENT_CHILD_CSV = os.path.normpath(
-    os.path.join(_HERE, "..", "essbase_outline_parent_child.csv"))
+_CSV_NAME = "essbase_outline_parent_child.csv"
+# parent/child 建檔預設在 repo 根（financial_agent 的上一層）；找不到再搜其他常見位置。
+DEFAULT_PARENT_CHILD_CSV = os.path.normpath(os.path.join(_HERE, "..", _CSV_NAME))
+
+
+def parent_child_csv_path(csv_path: str | None = None) -> str | None:
+    """定位 parent/child 建檔：給定路徑優先，否則搜常見位置；找不到回 None。"""
+    cands = [csv_path] if csv_path else []
+    cands += [
+        os.path.join(_HERE, "..", _CSV_NAME),        # repo 根（預設位置）
+        os.path.join(_HERE, _CSV_NAME),              # 與本模組同層（financial_agent/）
+        os.path.join(os.getcwd(), _CSV_NAME),        # 目前工作目錄
+        os.path.join(os.getcwd(), "..", _CSV_NAME),  # 工作目錄上一層
+    ]
+    for p in cands:
+        if p and os.path.exists(p):
+            return os.path.normpath(p)
+    return None
 
 
 def _to_num(v: Any) -> float | None:
@@ -89,9 +104,9 @@ def load_parent_map(csv_path: str | None = None,
     dimension 有給就只取該維度（避免不同維度同名成員互相汙染）。
     檔案不存在則回空 dict（呼叫端自行降級成平面）。
     """
-    path = csv_path or DEFAULT_PARENT_CHILD_CSV
+    path = parent_child_csv_path(csv_path)
     parent: dict[str, str] = {}
-    if not os.path.exists(path):
+    if not path:
         return parent
     with open(path, encoding="utf-8") as f:
         for r in _csv.DictReader(f):

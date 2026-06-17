@@ -171,6 +171,11 @@ sel = st.sidebar.multiselect(col_dim, col_members, default=col_members)
 view = df[df[col_dim].isin(sel)] if sel else df
 
 pmap = eg.load_parent_map(dimension=row_dim)
+if not pmap:
+    st.warning(
+        f"找不到階層建檔 `{eg._CSV_NAME}`，階層圖/表會退成平面。\n\n"
+        f"它在 **repo 根目錄**（`financial_agent` 的上一層）。請確認有 `git pull` 整個 repo，"
+        f"或直接把該檔放到 `{HERE}` 也可以。")
 
 tab_viz, tab_tbl = st.tabs(["🌳 階層視覺化", "📋 樞紐表"])
 
@@ -210,11 +215,15 @@ with tab_tbl:
             try:
                 wide = (view.pivot_table(index=row_dim, columns=col_dim,
                                          values="value", aggfunc="sum").reset_index())
-                wide["path"] = wide[row_dim].map(lambda m: eg.member_path(m, pmap))
+                # path 存成「分隔字串」(用 US 控制字元 \x1f)，JS 端再 split 回陣列；
+                # 直接塞 list 會被序列化成字串，AgGrid 對它呼叫 .join() → "i.join is not a function"
+                wide["path"] = wide[row_dim].map(
+                    lambda m: chr(31).join(eg.member_path(m, pmap)))
                 gob = GridOptionsBuilder.from_dataframe(wide.drop(columns=[row_dim, "path"]))
                 opts = gob.build()
                 opts["treeData"] = True
-                opts["getDataPath"] = JsCode("function(d){return d.path;}")
+                opts["getDataPath"] = JsCode(
+                    "function(d){return String(d.path).split(String.fromCharCode(31));}")
                 opts["autoGroupColumnDef"] = {
                     "headerName": row_dim,
                     "cellRendererParams": {"suppressCount": True}}

@@ -12,7 +12,7 @@
               "formatValues":true,"memberIdentifierType":"NAME"}}
 
 設定來源（優先序高→低）：命令列參數 > 環境變數 / .env > 本檔頂端 DEFAULT_* 常數
-    FA_ESB_URI   REST 基底，例：https://host:9001/essbase/rest/v1
+    FA_ESB_URI   REST 基底，例：http://host:9001/essbase/rest/v1（9001 多為明文 HTTP；走 TLS 才用 https）
     FA_ESB_APP   application name（預設 VEMIS2T）
     FA_ESB_DB    database name （預設 IEMISA）
     FA_ESB_USER  帳號
@@ -43,14 +43,19 @@ import urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # ── 想直接寫死也行（留空就走環境變數 / .env）──────────────────────────────
-DEFAULT_URI = ""              # 例：https://your-host:9001/essbase/rest/v1
+DEFAULT_URI = ""              # 例：http://your-host:9001/essbase/rest/v1（9001 常是明文 HTTP；TLS 才用 https）
 DEFAULT_APP = "VEMIS2T"
 DEFAULT_DB = "IEMISA"
 DEFAULT_USER = ""
 DEFAULT_PWD = ""
 
-# 換成你「已知可以跑」的 MDX；FROM 要對到 APP.DB。
-DEFAULT_MDX = "SELECT {} ON COLUMNS FROM VEMIS2T.IEMISA"
+# 你實測可跑的 MDX。FROM 的 __APP__/__DB__ 會在執行時自動換成設定的 app/db，
+# 所以只要改 .env 的 FA_ESB_APP/FA_ESB_DB 即可，這行不用動。
+DEFAULT_MDX = (
+    "SELECT { [Currency].[NTD K], [Currency].[USD K] } ON COLUMNS, "
+    "{ Descendants([Sector Total], 1, SELF_AND_BEFORE) } ON ROWS "
+    "FROM __APP__.__DB__"
+)
 
 
 def load_dotenv(*paths: str) -> None:
@@ -133,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[讀檔失敗] {e}", file=sys.stderr)
             return 2
     else:
-        mdx = args.mdx or DEFAULT_MDX
+        mdx = args.mdx or DEFAULT_MDX.replace("__APP__", app).replace("__DB__", db)
 
     url = f"{base}/applications/{app}/databases/{db}/mdx?format=JSON"
     body = build_body(mdx)

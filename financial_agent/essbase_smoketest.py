@@ -85,13 +85,18 @@ def _cfg(name: str, default: str) -> str:
     return (os.environ.get(name) or default or "").strip()
 
 
-def build_body(mdx: str) -> bytes:
-    """用 json.dumps 組 body（自動跳脫引號/換行，比 VBA 字串相接更安全）。"""
+def build_body(mdx: str, format_values: bool = True) -> bytes:
+    """用 json.dumps 組 body（自動跳脫引號/換行，比 VBA 字串相接更安全）。
+
+    format_values=False 會關掉 formatValues/formatString，取「原始數值」
+    （避免格式字串造成的科學記號/千分位等怪字串，較好直接給 pandas 用）。
+    """
     payload = {
         "query": mdx.strip(),
         "preferences": {
             "dataless": False,
-            "formatValues": True,
+            "formatValues": format_values,
+            "formatString": format_values,
             "memberIdentifierType": "NAME",
         },
     }
@@ -196,7 +201,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--legacy-tls", action="store_true",
                     help="放寬 TLS（容忍舊版伺服器 / 弱 cipher；解 OpenSSL 比 Windows 嚴的連線中止）")
     ap.add_argument("--accept", metavar="MIME", default="application/octet-stream",
-                    help="Accept 標頭（預設 application/octet-stream，與 VBA 一致；可試 application/json）")
+                    help="Accept 標頭（預設 application/octet-stream，與 VBA 一致；另支援 text/html）")
+    ap.add_argument("--raw-values", action="store_true",
+                    help="關閉 formatValues/formatString 取原始數值（避免格式化造成的科學記號/怪字串）")
     ap.add_argument("--debug", action="store_true", help="失敗時印完整 traceback")
     args = ap.parse_args(argv)
 
@@ -231,7 +238,7 @@ def main(argv: list[str] | None = None) -> int:
         mdx = args.mdx or DEFAULT_MDX.replace("__APP__", app).replace("__DB__", db)
 
     url = f"{base}/applications/{app}/databases/{db}/mdx?format=JSON"
-    body = build_body(mdx)
+    body = build_body(mdx, format_values=not args.raw_values)
     token = base64.b64encode(f"{user}:{pwd}".encode("utf-8")).decode("ascii")
 
     print("== Essbase 連線測試 ==")

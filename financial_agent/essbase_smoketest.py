@@ -98,6 +98,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--timeout", type=int, default=120, help="逾時秒數（預設 120）")
     ap.add_argument("--insecure", action="store_true", help="跳過 TLS 憑證驗證（自簽用）")
     ap.add_argument("--proxy", metavar="URL", help="指定 HTTP(S) Proxy，例：http://proxy:8080")
+    ap.add_argument("--proxy-user", metavar="USER", help="Proxy 帳號（Proxy 需認證時；免去把密碼塞進 URL/編碼）")
+    ap.add_argument("--proxy-pass", metavar="PWD", help="Proxy 密碼（搭配 --proxy-user）")
     ap.add_argument("--legacy-tls", action="store_true",
                     help="放寬 TLS（容忍舊版伺服器 / 弱 cipher；解 OpenSSL 比 Windows 嚴的連線中止）")
     ap.add_argument("--debug", action="store_true", help="失敗時印完整 traceback")
@@ -168,6 +170,11 @@ def main(argv: list[str] | None = None) -> int:
     handlers: list = [urllib.request.HTTPSHandler(context=ctx)]
     if args.proxy:
         handlers.append(urllib.request.ProxyHandler({"http": args.proxy, "https": args.proxy}))
+        if args.proxy_user:
+            # Proxy 需認證：用帳密管理器，不必把密碼編碼塞進 URL（僅支援 Basic proxy auth）
+            pmgr = urllib.request.HTTPPasswordMgrWithDefaultRealm()
+            pmgr.add_password(None, args.proxy, args.proxy_user, args.proxy_pass or "")
+            handlers.append(urllib.request.ProxyBasicAuthHandler(pmgr))
     opener = urllib.request.build_opener(*handlers)
 
     try:

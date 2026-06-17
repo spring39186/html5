@@ -1,0 +1,133 @@
+Dimension,Parent,Child,ConsolidationOp,DataStorage,SolveOrder,HasFormula,Notes
+Time,,Time,,Store data,,,Dimension type=Time
+Time,Time,2007,+,Store data,,,
+Time,2007,2007/H1,+,Store data,,,collapsed:2 children not shown
+Time,2007,2007/H2,+,Store data,,,collapsed:2 children not shown
+Time,Time,2008,+,Store data,,,collapsed:2 children not shown
+Time,Time,2009,+,Store data,,,collapsed:2 children not shown
+Time,Time,2010,+,Store data,,,collapsed:2 children not shown
+Time,Time,2011,+,Store data,,,collapsed:2 children not shown
+Time,Time,2012,+,Store data,,,collapsed:2 children not shown
+Time,Time,2013,+,Store data,,,collapsed:2 children not shown
+Time,Time,2014,+,Store data,,,collapsed:2 children not shown
+Time,Time,2015,+,Store data,,,collapsed:2 children not shown
+Time,Time,2016,+,Store data,,,collapsed:2 children not shown
+Time,Time,2017,+,Store data,,,collapsed:2 children not shown
+Time,Time,2018,+,Store data,,,collapsed:2 children not shown
+Time,Time,2019,+,Store data,,,collapsed:2 children not shown
+Time,Time,2020,+,Store data,,,collapsed:2 children not shown
+Time,Time,2021,+,Store data,,,collapsed:2 children not shown
+Time,Time,2022,+,Store data,,,collapsed:2 children not shown
+Time,Time,2023,+,Store data,,,collapsed:2 children not shown
+Time,Time,2024,+,Store data,,,collapsed:2 children not shown
+Time,Time,2025,+,Store data,,,collapsed:2 children not shown
+Measure,,Measure,,Label only,,,Dimension type=Accounts
+Measure,Measure,Current,~,Store data,,,
+Measure,Measure,OP,+,Store data,,,
+Measure,Measure,Current %,~,Store data,67,Y,
+Measure,Measure,Current_D,~,Store data,66,Y,
+Measure,Measure,Current YTD,~,Store data,66,Y,
+Measure,Measure,Last Period,~,Store data,67,Y,
+Measure,Measure,Same Period LY,~,Store data,68,Y,
+Measure,Measure,CS_D,~,Store data,68,Y,
+Measure,Measure,Last Year YTD,~,Store data,70,Y,
+Measure,Measure,CYLY_D,~,Store data,70,Y,
+Measure,Measure,CL_D,~,Store data,67,Y,
+Measure,Measure,C/L Variance,~,Store data,68,Y,
+Measure,Measure,C/L %,~,Store data,69,Y,
+Measure,Measure,C/S Variance,~,Store data,72,Y,
+Measure,Measure,C/S %,~,Store data,72,Y,
+Measure,Measure,CY/LY Variance,~,Store data,72,Y,
+Measure,Measure,CY/LY %,~,Store data,72,Y,
+Measure,Measure,Draft Variance,+,Store data,66,Y,
+Measure,Measure,C/D Variance,+,Store data,66,Y,
+Measure,Measure,C/D%,+,Store data,67,Y,
+Measure,Measure,FcstV2,+,Store data,66,Y,
+Measure,Measure,C/F2 Variance,+,Store data,66,Y,
+Measure,Measure,C/F2 %,+,Store data,67,Y,
+Currency,,Currency,,Store data,,,Dimension type=None
+Currency,Currency,NTD K,+,Store data,,,
+Currency,Currency,USD K,+,Store data,,,
+Sector Total,,Sector Total,,Never share,,,Dimension type=None
+Sector Total,Sector Total,Assy,+,Store data,,,
+Sector Total,Assy,AsLogic,+,Store data,,,
+Sector Total,Assy,AsMemory,+,Store data,,,
+Sector Total,Sector Total,Test,+,Store data,,,
+Sector Total,Test,TeLogic,+,Store data,,,
+Sector Total,Test,TeMemory,+,Store data,,,
+Sector Total,Sector Total,Material,+,Store data,,,
+Sector Total,Material,BGA,+,Store data,,,
+Sector Total,Material,FlipChip,+,Store data,,,
+Sector Total,Material,LeadFrame,+,Store data,,,
+Sector Total,Sector Total,EMS,+,Store data,,,
+Sector Total,EMS,EMSEMS,+,Store data,,,
+Sector Total,Sector Total,Estate,+,Store data,,,
+Sector Total,Estate,ReEstate,+,Store data,,,
+Sector Total,Sector Total,Other,+,Store data,,,
+Sector Total,Other,OtOther,+,Store data,,,
+Site Group,,Site Group,,Store data,,,Dimension type=None
+Site Group,Site Group,ASEHoldCo_Group,+,Store data,,,
+Site Group,Site Group,NewK_Group,+,Store data,,,
+Site Group,Site Group,M_Group,+,Store data,,,
+Site Group,Site Group,T_Group,+,Store data,,,
+Site Group,Site Group,Oth_Manufactors,+,Store data,,,
+Site Group,Site Group,Holdings,+,Store data,,,
+Site Group,Site Group,Group Elim,+,Store data,,,
+Site Group,Site Group,EMS_Group,+,Store data,,,
+Site Group,Site Group,R_Group,+,Store data,,,
+Site Group,Site Group,OtherRE_Group,+,Store data,,,
+Site Group,Site Group,RealEstate,+,Store data,,,
+Site Group,Site Group,Global Elim,+,Store data,,,
+Site Group,Site Group,Group,+,Store data,,,
+Site Group,Site Group,ASE_Group.,+,Store data,,,
+Site Group,Site Group,SPIL_Group,+,Store data,,,
+Site Group,Site Group,HCOther_Group,+,Store data,,,
+Site Group,Site Group,HCGlobalElim,+,Store data,,,
+Site Group,Site Group,Other_Semi_Group,+,Store data,,,
+Site Org,,Site Org,,Store data,35,,Dimension type=None
+Site Org,Site Org,ASEHoldCo,+,Store data,,,
+Site Org,Site Org,ASEInc_Group,+,Store data,30,,collapsed:5 children not shown
+Site Org,Site Org,SPIL_Group,+,Store data,30,,collapsed:2 children not shown
+Site Org,Site Org,EMS_Group,+,Store data,30,,collapsed:1 children not shown
+Site Org,Site Org,ASEGIS,+,Store data,,,
+Site Org,Site Org,UGlobal,+,Store data,,,
+Site Org,Site Org,HCOther_Group,+,Store data,,,collapsed:1 children not shown
+Site Org,Site Org,HCGlobalElim,+,Store data,30,,collapsed:15 children not shown
+Site Org,Site Org,OtherR_Group,~,Store data,30,,collapsed:15 children not shown
+Site Org,Site Org,OtherH_Group,~,Store data,32,,collapsed:34 children not shown
+Scenario,,Scenario,,Store data,,,Dimension type=None
+Scenario,Scenario,Actual,+,Store data,,,
+Scenario,Scenario,Draft,+,Store data,,,
+Scenario,Scenario,Draft & Final,~,Store data,32,Y,
+Scenario,Scenario,ForecastV1,+,Store data,,,
+Scenario,Scenario,ForecastV2,+,Store data,,,
+Scenario,Scenario,ForecastV3,+,Store data,,,
+Scenario,Scenario,ForecastV4,+,Store data,,,
+Filings,,Filings,,Label only,,,Dimension type=None
+Filings,Filings,TW_Filing,~,Store data,,,
+Filings,Filings,US_Filing,~,Store data,,,
+Period,,Period,,Dynamic calc,,,Attribute(Text) assoc=Time
+Period,Period,H1,,Dynamic calc,,,
+Period,H1,Q1,,Dynamic calc,,,collapsed:3 children not shown
+Period,H1,Q2,,Dynamic calc,,,collapsed:3 children not shown
+Period,Period,H2,,Dynamic calc,,,collapsed:2 children not shown
+Year,,Year,,Dynamic calc,,,Attribute(Text) assoc=Time
+Year,Year,2007,,Dynamic calc,,,
+Year,Year,2008,,Dynamic calc,,,
+Year,Year,2009,,Dynamic calc,,,
+Year,Year,2010,,Dynamic calc,,,
+Year,Year,2011,,Dynamic calc,,,
+Year,Year,2012,,Dynamic calc,,,
+Year,Year,2013,,Dynamic calc,,,
+Year,Year,2014,,Dynamic calc,,,
+Year,Year,2015,,Dynamic calc,,,
+Year,Year,2016,,Dynamic calc,,,
+Year,Year,2017,,Dynamic calc,,,
+Year,Year,2018,,Dynamic calc,,,
+Year,Year,2019,,Dynamic calc,,,
+Year,Year,2020,,Dynamic calc,,,
+Year,Year,2021,,Dynamic calc,,,
+Year,Year,2022,,Dynamic calc,,,
+Year,Year,2023,,Dynamic calc,,,
+Year,Year,2024,,Dynamic calc,,,
+Year,Year,2025,,Dynamic calc,,,

@@ -126,8 +126,8 @@ FROM App.Db
 > **每顆 cube 各維護一份 outline 檔**（檔名帶 cube）：
 > - `essbase_outline_parent_child.<App.Db>.csv` — 程式讀這份產生上面的摘要。
 > - `essbase_outline.<App.Db>.md` — 人看的完整縮排階層 + 成員公式。
-> - 找不到 cube 專屬檔時，退回通用 `essbase_outline_parent_child.csv` / `essbase_outline.md`
->   （**目前這兩個通用檔即 `VSalRPTH.SaleRPTA` 的 outline**）。
+> - 目前已備妥 **`VSalRPTH.SaleRPTA`** 的檔：`essbase_outline_parent_child.VSalRPTH.SaleRPTA.csv`
+>   與 `essbase_outline.VSalRPTH.SaleRPTA.md`。（找不到 cube 專屬檔時，才退回無 cube 後綴的舊檔名。）
 >
 > ⚠ outline 檔是「對某一顆 cube」抽取的快照；**換 cube 一定要抽該 cube 的 outline 檔**
 > （抽法記在 `CLAUDE.md`）。部分分支抽取時為「收合」狀態（標 `collapsed:N`），深層葉成員可能未完整列出。

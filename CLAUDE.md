@@ -6,18 +6,20 @@ The `financial_agent` data backend is being switched **from Teradata to Essbase*
 Future financial-data queries should target the **Essbase multidimensional cube**
 (MDX against the outline), **not** Teradata/MSSQL SQL.
 
-- **Canonical cube structure:** [`essbase_outline.md`](essbase_outline.md)
+- **Canonical cube structure** (per cube, filename carries the `App.Db`):
+  [`essbase_outline.VSalRPTH.SaleRPTA.md`](essbase_outline.VSalRPTH.SaleRPTA.md)
   (indented hierarchy + member formulas) and
-  [`essbase_outline_parent_child.csv`](essbase_outline_parent_child.csv)
+  [`essbase_outline_parent_child.VSalRPTH.SaleRPTA.csv`](essbase_outline_parent_child.VSalRPTH.SaleRPTA.csv)
   (loadable parent/child build file). Treat these as the source of truth for the
-  Essbase outline. Re-extract/refresh them if the cube changes.
+  `VSalRPTH.SaleRPTA` outline. Re-extract/refresh them if the cube changes.
   - **Per-cube outline files**: each cube has its own outline. The loader
     (`essbase_grid.parent_child_csv_path(cube=...)`, used by `outline_summary`/
     `load_parent_map`, and by the agent's `get_database_schema`) resolves
-    `essbase_outline_parent_child.<App.Db>.csv` first, then falls back to the bare
-    `essbase_outline_parent_child.csv`. The current bare files **are the
-    `VSalRPTH.SaleRPTA` outline**. For a new cube, drop
-    `essbase_outline_parent_child.<App.Db>.csv` (and `essbase_outline.<App.Db>.md`).
+    `essbase_outline_parent_child.<App.Db>.csv` first, then the bare
+    `essbase_outline_parent_child.csv` (back-compat), then globs any
+    `essbase_outline_parent_child.*.csv` when no cube is given (pivot demo/tests).
+    For a new cube, drop `essbase_outline_parent_child.<App.Db>.csv`
+    (and `essbase_outline.<App.Db>.md`).
 - **Cube = 10 dimensions:**
   - `Time` (Time) — years 2007–2025, each year → H1/H2 → quarters …
   - `Measure` (Accounts, Label only) — 23 members; `Current`, `OP` + ~20 derived

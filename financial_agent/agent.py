@@ -833,7 +833,7 @@ def _db_csv_path() -> str:
 
 def get_database_schema(args: dict, file_registry: dict) -> str:
     """回傳 Essbase cube 的 MDX 查詢指南（讀 essbase_mdx_guide.md）+ 實際 cube 名
-    + 「動態」outline（每顆 cube 不同，即時讀 essbase_outline_parent_child.csv 帶入）。
+    + 「動態」outline（每顆 cube 不同，依設定的 cube 抓對應的 outline 檔即時帶入）。
 
     指南內容（資料庫說明 / MDX 教學 / 可抄範例）可直接編輯該 md，不需改程式；
     outline 則跟著 cube 走（換 cube 重抽 parent_child.csv 即自動更新）。"""
@@ -871,16 +871,19 @@ def get_database_schema(args: dict, file_registry: dict) -> str:
     except Exception as e:  # noqa: BLE001
         outline = ""
         print(f"   ⚠️ 產生 outline 摘要失敗：{e}")
+    csv_name = (f"essbase_outline_parent_child.{cube_id}.csv" if cube_id
+                else "essbase_outline_parent_child.<App.Db>.csv")
+    md_name = f"essbase_outline.{cube_id}.md" if cube_id else "essbase_outline.<App.Db>.md"
     if outline:
         outline_block = (
             "\n\n---\n\n## 本 cube 實際維度與成員（自動產生，隨 cube 改變）\n\n"
-            "> 來源：`essbase_outline_parent_child.csv`；完整階層見 `essbase_outline.md`。\n"
-            "> 換 cube 時重抽這兩個檔，本段就會自動跟著更新。\n\n"
+            f"> 來源：`{csv_name}`（每顆 cube 一份）；完整階層見 `{md_name}`。\n"
+            "> 換 cube 重抽這兩個檔，本段就跟著更新。\n\n"
             f"{outline}\n")
     else:
         outline_block = (
             "\n\n---\n\n## 本 cube 維度與成員\n\n"
-            "⚠️ 找不到 `essbase_outline_parent_child.csv`，無法帶入實際 outline。"
+            f"⚠️ 找不到 `{csv_name}`，無法帶入實際 outline。"
             "請對目前的 cube 重抽該檔放到 financial_agent/ 或 repo 根目錄。\n")
 
     return header + guide_text + outline_block

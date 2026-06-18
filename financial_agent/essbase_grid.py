@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import csv as _csv
+import glob as _glob
 import os
 from typing import Any
 
@@ -31,22 +32,30 @@ DEFAULT_PARENT_CHILD_CSV = os.path.normpath(os.path.join(_HERE, "..", _CSV_NAME)
 
 def parent_child_csv_path(csv_path: str | None = None,
                           cube: str | None = None) -> str | None:
-    """定位 parent/child 建檔（**每顆 cube 各維護一份**）。
+    """定位 parent/child 建檔（**每顆 cube 一份，檔名帶 cube**）。
 
     順序：明確 `csv_path` ＞ 該 cube 專屬檔 `essbase_outline_parent_child.<App.Db>.csv`
-    ＞ 通用 `essbase_outline_parent_child.csv`（目前 = VSalRPTH.SaleRPTA）。找不到回 None。
+    ＞ 通用 `essbase_outline_parent_child.csv`（向下相容）。
+    沒指定 cube 又找不到上述檔時，最後 glob 任一「顯名」檔（給 pivot demo / 測試用）。
+    指定了 cube 卻沒有對應檔 → 回 None（不亂抓別顆 cube 的 outline）。
     """
     dirs = (_HERE, os.path.join(_HERE, ".."),          # financial_agent/、repo 根
             os.getcwd(), os.path.join(os.getcwd(), ".."))
     names: list[str] = []
     if cube and cube.strip():
         names.append(f"essbase_outline_parent_child.{cube.strip()}.csv")  # cube 專屬優先
-    names.append(_CSV_NAME)                                                # 通用 fallback
+    names.append(_CSV_NAME)                                                # 通用（向下相容）
     cands = [csv_path] if csv_path else []
     cands += [os.path.join(d, n) for n in names for d in dirs]
     for p in cands:
         if p and os.path.exists(p):
             return os.path.normpath(p)
+    # 沒給 cube（pivot demo / 測試）→ 撿任一「顯名」outline 檔
+    if not (cube and cube.strip()):
+        for d in dirs:
+            hits = sorted(_glob.glob(os.path.join(d, "essbase_outline_parent_child.*.csv")))
+            if hits:
+                return os.path.normpath(hits[0])
     return None
 
 

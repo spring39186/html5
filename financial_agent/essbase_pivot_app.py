@@ -169,12 +169,12 @@ for d in col_dims:
     if chosen:
         view = view[view[d].isin(chosen)]
 
-pmap = eg.load_parent_map(dimension=row_dim)
+pmap = eg.load_parent_map(dimension=row_dim, cube=f"{app}.{db}")
 if not pmap:
     st.warning(
-        f"找不到階層建檔 `{eg._CSV_NAME}`，階層圖/表會退成平面。\n\n"
-        f"它在 **repo 根目錄**（`financial_agent` 的上一層）。請確認有 `git pull` 整個 repo，"
-        f"或直接把該檔放到 `{HERE}` 也可以。")
+        f"找不到 `{app}.{db}` 的階層建檔 `essbase_outline_parent_child.{app}.{db}.csv`，"
+        "階層圖/表會退成平面。\n\n"
+        f"請把該 cube 的 outline 檔放到 `{HERE}`（或 repo 根目錄）。")
 
 st.subheader("📋 階層樞紐表")
 

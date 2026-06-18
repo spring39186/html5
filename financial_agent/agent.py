@@ -1236,8 +1236,16 @@ def dispatch_tool(func_name: str, args: dict, file_registry: dict,
 # ============================================================
 # 快速路徑
 # ============================================================
+_ASSISTANT_IDENTITY = (
+    "你是「AI 財務審計助理」，部署在本財務分析平台上、由後端設定的語言模型驅動。"
+    "若被問及你是什麼模型／底層架構：說明你是本平台部署的 AI 助理，"
+    "切勿宣稱自己是 GPT-4／GPT／OpenAI／Claude／Gemini／Llama 等任何特定外部模型或廠商"
+    "（那並非事實，後端模型由系統設定）。")
+
+
 def handle_fast_chat(user_prompt: str, history: List[dict] = None) -> str:
-    messages = [{"role": "system", "content": "你是友善的 AI 助手，請用繁體中文回覆。"}]
+    messages = [{"role": "system",
+                 "content": f"{_ASSISTANT_IDENTITY} 請一律用繁體中文、友善地回覆。"}]
     messages += _history_messages(history)
     messages.append({"role": "user", "content": user_prompt})
     return _chat(MODEL_CONFIG.chat, messages, temperature=0.7)
@@ -1246,7 +1254,7 @@ def handle_fast_chat(user_prompt: str, history: List[dict] = None) -> str:
 def handle_direct_answer(user_prompt: str, plan: PlanningResult,
                          history: List[dict] = None) -> str:
     messages = [{"role": "system",
-                 "content": ("你是專業財務 AI 助手。請用繁體中文回答。"
+                 "content": (f"{_ASSISTANT_IDENTITY} 請用繁體中文回答。"
                              "若使用者是追問先前的結果或你做過的動作（例如剛才執行的 SQL），"
                              "請根據對話脈絡直接回答。\n"
                              f"本次規劃分析：{plan.reasoning}")}]

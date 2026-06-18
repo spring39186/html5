@@ -19,6 +19,7 @@
   ```
 - 成員一律寫 `[維度].[成員]`；集合用 `{ }`、成員間用逗號分隔。
 - 一個維度只能出現在「一個軸」**或** `WHERE` 其中一處，不可重複。
+- **要「全部／合計」就用維度的「頂層成員」本身**（如 `[Sector Total]`、`[Currency]`、`[Site Org]`），或 `[維度].Members`／`Descendants(頂層, 1, SELF_AND_BEFORE)`。Essbase **沒有** SSAS 的 `[All]` 成員——**嚴禁** `[X].[All]`、`[維度].[All Departments]`、`[Sector Total].[All Sectors]`（一律報 `Unknown Member`）。每個維度的頂層成員名就印在 outline 各維度的「頂層 `[…]`」欄。各維度只用 outline 列出的名字，**不要自創** `[Department]`、`[Sector]` 等不存在的維度。
 - 產好 MDX 後，呼叫 `run_sql_query` 工具，把查詢字串放進 **`mdx`** 參數。
 
 ---
@@ -117,6 +118,8 @@ FROM App.Db
 3. **set 與 tuple 搞混**：多成員用 `{ }`，單一座標用 `( )`。
 4. **空軸**：每個軸至少要有成員。
 5. **成員名亂猜**：只用 §3 Outline 列出的成員；不確定就用 `Children`/`Descendants` 動態展開。
+   - **最常見：亂加 `[All]`**。Essbase 沒有 `[All]`／`[All Departments]`／`[All Sectors]`。要全部/合計→直接用頂層成員（`[Sector Total]`）或 `Descendants([Sector Total], 1, SELF_AND_BEFORE)`。
+   - **自創維度**：本 cube 沒有 `Department`/`Sector`；部門請用 `Sector Total` 維。
 6. **成員前綴只能一層**（Essbase 專屬）：寫 `[維度].[成員]` 或 `[單一祖先].[成員]`，
    **不要串多個祖先**（如 `[A].[B].[C].[成員]`）——Essbase 會報錯。
 7. **別用 SSAS 語法**（Essbase 專屬）：沒有 `&[key]`、沒有 `.&[2018]` 這種鍵參照；

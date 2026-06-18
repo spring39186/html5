@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import base64
 import http.client
+import inspect
 import json
 import os
 import ssl
@@ -111,6 +112,19 @@ def fetch_live(mdx: str, app: str, db: str, raw_values: bool = True) -> dict:
 # ════════════════════════════════════════════════════════════════════════════
 st.set_page_config(page_title="Essbase 樞紐分析", layout="wide")
 st.title("📊 Essbase 多維度樞紐分析")
+
+# 版本防呆：essbase_grid 必須是「有 cube 參數」的新版。Streamlit 不會自動重新 import
+# 已載入的模組，所以改了 essbase_grid.py 後一定要「完整重啟」streamlit（非 Rerun）。
+try:
+    _eg_stale = "cube" not in inspect.signature(eg.load_parent_map).parameters
+except (TypeError, ValueError):
+    _eg_stale = False
+if _eg_stale:
+    st.error(
+        "`essbase_grid.py` 版本過舊（`load_parent_map` 沒有 `cube` 參數）。\n\n"
+        "請更新 `financial_agent/essbase_grid.py` 到最新版，並**完整重啟** `streamlit run`"
+        "（Ctrl+C 後重跑，不是按網頁的 Rerun——Streamlit 不會重新 import 已載入的模組）。")
+    st.stop()
 
 # ── 側邊欄：資料來源 ────────────────────────────────────────────────────────
 st.sidebar.header("資料來源")

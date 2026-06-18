@@ -40,6 +40,26 @@
   - **`Period`、`Year` 是屬性維**（Period＝H1/H2/Q…/`01`–`12`；Year＝2007–2025），主要用於**篩選/切片**（如 `WHERE ([Year].[2018])`）；要當欄軸放月份，優先用 `Time` 的 `2018/01…12`。
   - ⚠️ **要「每個月都列出來」（含沒資料的月顯示 0）時，不要加 `NON EMPTY`**：Essbase 會在回傳前就把「整月皆 #Missing」的月份（如某年 1~4 月）整欄藏掉，後端就補不回來了。把 12 個月（`Descendants([Time].[2018], LEAVES)`）放上軸、且**不要 NON EMPTY**，後端會自動把 #Missing 補成 0。
 
+### 1.1 中文業務詞 → 維度對照（**使用者用中文時必看**）
+
+使用者多半用中文（如「部門」「幣別」「情境」）。本 cube 維度名是英文，請**先用下表把中文對應到正確維度**，再產 MDX；**絕不自創維度（如 `Department`/`Sector`）或 `[All]` 成員**。
+
+| 使用者常說的中文 | 對應維度（MDX 用這名字） | 備註／常用成員 |
+|---|---|---|
+| **部門**、事業群、事業部、產業別、Sector | **`Sector Total`** | ⚠️ 沒有 `Department`／`Sector` 維！「各部門」＝ `Descendants([Sector Total], 1, SELF_AND_BEFORE)` |
+| **幣別**、貨幣、台幣、美元 | **`Currency`** | 台幣＝`[Currency].[NTD K]`、美元＝`[Currency].[USD K]` |
+| **指標**、科目、度量、金額類型 | **`Measure`** | `Current`(本期)、各種 `… Variance`／`… %`／`… YTD` |
+| **情境**、版本、實際、草稿、預算、預測 | **`Scenario`** | `Actual`／`Draft`／`ForecastV1…4` 等 |
+| **時間**、年、季、月 | **`Time`** | 月＝`[Time].[2018/01]`…；各月＝`Descendants([Time].[2018], LEAVES)` |
+| 年度、哪一年（純篩選） | `Year`（屬性）或 `Time` | `WHERE ([Year].[2018])` |
+| 期間、上下半年、季（純篩選） | `Period`（屬性）或 `Time` | H1/H2、Q1–Q4 |
+| 廠區群組、據點群組 | **`Site Group`** | |
+| 廠區、據點、組織、公司別 | **`Site Org`** | |
+| 申報、報備 | **`Filings`** | `TW_Filing`／`US_Filing` |
+
+> 表上對不到時：看文末 outline 的維度清單做語意對應；仍不確定就 `Children`/`Descendants` 展開該維頂層查看成員——**不要硬猜、不要自創維度/成員**。
+> （此表是業務知識，可直接編輯；上面非英文直觀的對應（如廠區/據點）請依貴公司實際定義調整。）
+
 ---
 
 ## 2. MDX 基本教學

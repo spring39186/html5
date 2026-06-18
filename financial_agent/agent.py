@@ -61,7 +61,6 @@ import units
 
 import urllib.parse
 import httpx
-import pyodbc
 
 # ============================================================
 # 初始化
@@ -180,7 +179,7 @@ def _phase_message(phase: str, event: dict):
     if phase == "tool_call":
         tool = event.get("tool", "")
         args = event.get("args", {}) or {}
-        detail = args.get("file_name") or args.get("search_query") or args.get("sql") or ""
+        detail = args.get("file_name") or args.get("search_query") or args.get("mdx") or args.get("sql") or ""
         names = {"parse_financial_pdf": "📄 解析檔案", "search_knowledge_base": "🔎 檢索",
                  "get_database_schema": "🗂️ 讀取資料庫結構", "run_sql_query": "📊 查詢資料庫"}
         return f"{names.get(tool, '🔧 ' + tool)}：{str(detail)[:50]}"
@@ -833,10 +832,9 @@ def _db_csv_path() -> str:
 
 
 def get_database_schema(args: dict, file_registry: dict) -> str:
-    """回傳真實 Teradata 資料庫（Essbase 多維寬表）的結構說明，
-    引導 Planner 生成正確 SQL、Coder 寫出極簡的 Pandas 樞紐腳本。"""
-    print("🗂️ [DB Schema] 提供 Teradata 資料庫結構與業務簡介說明")
-    print("🗂️ [DB Schema] 動態載入資料字典與業務簡介")
+    """回傳 Essbase 多維 cube 的結構說明（維度/成員 + MDX 範例），
+    引導模型產生正確 MDX 並呼叫 run_sql_query。"""
+    print("🗂️ [Cube Schema] 提供 Essbase 多維 cube 結構與 MDX 指引")
     
     # 1. 讀取外部 JSON 資料字典
     catalog_path = "table_catalog.json"
@@ -853,158 +851,107 @@ def get_database_schema(args: dict, file_registry: dict) -> str:
     else:
         table_list_prompt = "⚠️ 找不到 table_catalog.json 設定檔。"
 
-    # 2. 將動態組裝好的清單塞入 Master Prompt
+    # 2. 組裝 Essbase cube 結構與 MDX 指引（Master Prompt）
+    cube = (f"{RUNTIME.esb_app}.{RUNTIME.esb_db}"
+            if RUNTIME.esb_configured else "VSalRPTH.SaleRPTA")
     return f"""
-        【Teradata 財務資料庫結構與業務定義說明】
+        【Essbase 多維 OLAP Cube 結構與查詢指引】
 
-        📊 [可用資料表清單與業務簡介]
-        目前系統開放以下目標資料表供查詢。請根據使用者的分析需求，選擇最合適的表：
-        {table_list_prompt}
+        資料來源已從 Teradata 切換為 **Essbase cube**，請用 **MDX**（不是 SQL）查詢。
+        目標 cube：`{cube}`（FROM 子句寫 `FROM {cube}`）。
 
-        以上資料已完成 Reporting-ready（報表化）的多維度寬表，欄位符合 Essbase 多維 OLAP 結構：
+        📐 【10 個維度與主要成員】
+        - Time（時間）：年 2007–2025 → H1/H2 → 季 → 月（如 2018/01）。頂層成員 [Time]。
+        - Measure（科目，僅標籤）：Current、OP，及約 20 個衍生指標（YTD、變異、%、vs Draft/ForecastV2…）。
+        - Currency（幣別）：[Currency].[NTD K]、[Currency].[USD K]。
+        - Sector Total（部門，可加總）：Assy / Test / Material / EMS / Estate / Other（各自還有子項，如 Assy→AsLogic/AsMemory）。
+        - Site Group（18 個群組成員）、Site Org（10 個組織成員）。
+        - Scenario（情境）：Actual、Draft、Draft & Final、ForecastV1–V4。
+        - Filings（僅標籤）：TW_Filing、US_Filing。
+        - Period（屬性 H1/H2）、Year（屬性 2007–2025）：皆關聯 Time。
 
-        💡 【系統強制過濾與限制提示】
-        1. 系統底層已實施嚴格資料治理，會在 SQL 結尾自動附加 `< CAST(SUBSTR(YEAR_MON, 1, 4) AS INTEGER) < 2015` 的年份條件，如果你有條件則用 AND 補上。
-        2. 🚫 嚴禁寫出 `GROUP BY` 或 `ORDER BY`，否則會導致底層字串串接語法錯誤！
-        3. 🚫 嚴禁探測 Schema：你已經知道欄位結構了，絕對不可以寫出 `WHERE 1=0` 這種探測語法。
+        🧭 【MDX 撰寫規則】
+        1. 成員一律用中括號 `[維度].[成員]`；階層展開用 `Descendants(成員, 層數, SELF_AND_BEFORE)`、`Children`。
+        2. 骨架：`SELECT {{ 欄集合 }} ON COLUMNS, {{ 列集合 }} ON ROWS FROM {cube} WHERE ( 切片成員 )`。
+        3. 沒放在 ROWS/COLUMNS 的維度，用 `WHERE (...)` 固定成單一成員（slicer）。
+        4. 多維交叉用 `Crossjoin(集合A, 集合B)`。
 
-        【Essbase 多維 OLAP 欄位定義】
-        - PARENT_SITE_ORG (VARCHAR): 父組織。範例: `[Site Group].[Group]`
-        - CHILD_SITE_ORG (VARCHAR): 子組織 (含層級路徑)。範例: `[Site Org].[OtherH_Group].[IC_ATM_T].[M_Group Total-Consol]`
-        - SCTR_MBR_NM (VARCHAR): 業務科目。範例: `BGA NTD K`, `AsLogic NTD K`
-        - CURC (VARCHAR): 幣別。範例: `NTD`, `USD`
-        - YEAR_MON (VARCHAR): 時間維度，格式為 `YYYY_Mon`。範例: `2010_Jun`, `2011_May`
-        - SCENARIO (VARCHAR): 業務情境。範例: `ForecastV2`, `Actual`
-        - AMT (DECIMAL): 金額。範例: `222`, `22`
+        💡 【可直接參考的 MDX 範例】
+        - 各部門 × 幣別：
+          SELECT {{ [Currency].[NTD K], [Currency].[USD K] }} ON COLUMNS,
+                 {{ Descendants([Sector Total], 1, SELF_AND_BEFORE) }} ON ROWS FROM {cube}
+        - 部門 × 2018 各月 × 各情境（幣別固定 NTD K）：
+          SELECT {{ Crossjoin(Descendants([Time].[2018], 3, SELF), [Scenario].Children) }} ON COLUMNS,
+                 {{ Descendants([Sector Total], 1, SELF_AND_BEFORE) }} ON ROWS
+          FROM {cube} WHERE ([Currency].[NTD K])
 
-        【AI 執行樞紐分析與報表之硬性指示】
-        1. 💡 系統前端已內建強大的 PivotTableJS 與 AgGrid 視覺化套件。
-        2. 當使用者要求「樞紐分析」、「視覺化」或「看數據明細」時，你的**唯一任務**就是：產生精準的 SELECT SQL 並呼叫 `run_sql_query` 工具。
-        3. 🚨 嚴禁呼叫 Python 工具：執行完 SQL 後，底層會自動建立 CSV 快取並交給前端 PivotTableJS 渲染。你「絕對不需要」呼叫 `run_python_code` 來寫 Pandas 腳本！
-        4. 只要回覆使用者：「已為您撈取歷史資料，請切換至上方的『自由拖拉樞紐分析』頁籤（Tab 3）進行探索。」即可。
+        🚀 【執行與呈現的硬性指示】
+        1. 產生 MDX 後，呼叫 `run_sql_query`，把查詢字串放在 **`mdx`** 參數。
+        2. 底層會把結果落地成 CSV，交給前端 PivotTableJS / AgGrid 樞紐渲染。
+        3. 🚨 不需要 run_python_code 寫 Pandas；只要回覆：「已為您撈取資料，請切換至上方『樞紐分析』頁籤探索。」
         """
 
 
 def run_sql_query(args: dict, file_registry: dict) -> str:
-    """執行模型生成的 SELECT（唯讀）於 Teradata：pyodbc 連線、Big5 解碼防禦、pd.read_sql，
-    完整大數據落地為 utf-8-sig CSV（數據隔離），只回前 30 筆 Markdown 預覽 + 快取路徑標記。"""
-    raw_sql = args.get("sql", "")
+    """執行模型生成的 MDX 於 Essbase cube：essbase_client（已驗證連線 + essbase_grid 正確解析）
+    攤成長表，完整落地為 utf-8-sig CSV（數據隔離），只回前 30 筆 Markdown 預覽 + 快取路徑標記。
 
-    # ==============================================================
-    # 🛡️ 智能 SQL 字串注入 (Smart SQL Injection)
-    # 條件：強制年份必須小於 2015
-    # ==============================================================
-    enforce_cond = "CAST(SUBSTR(YEAR_MON, 1, 4) AS INTEGER) < 2015"
-    
-    # 使用 \b 確保精準匹配獨立的 WHERE 單字（忽略大小寫）
-    if re.search(r'\bWHERE\b', raw_sql, re.IGNORECASE):
-        # 【情境 A：有 WHERE】
-        # 把第一個 WHERE 替換成 "WHERE 強制條件 AND "
-        # 例如: WHERE SCENARIO = 'Actual' -> WHERE (強制條件) AND SCENARIO = 'Actual'
-        safe_sql = re.sub(
-            r'\bWHERE\b', 
-            f"WHERE {enforce_cond} AND ", 
-            raw_sql, 
-            count=1, 
-            flags=re.IGNORECASE
-        )
-    else:
-        # 【情境 B：沒有 WHERE】
-        # 必須檢查有沒有 GROUP BY 或 ORDER BY，有的話要插在它們「前面」
-        match = re.search(r'\b(GROUP BY|ORDER BY)\b', raw_sql, re.IGNORECASE)
-        if match:
-            # 找到 GROUP BY 或 ORDER BY 的起始位置，把 WHERE 插進去
-            insert_pos = match.start()
-            safe_sql = f"{raw_sql[:insert_pos]} WHERE {enforce_cond} {raw_sql[insert_pos:]}"
-        else:
-            # 如果什麼都沒有，就直接加在最後面
-            safe_sql = f"{raw_sql} WHERE {enforce_cond}"
-            
-    # 最後把分號補回來
-    safe_sql += ";"
+    註：工具名沿用 run_sql_query（避免改動路由/記憶），但實際執行的是 MDX；
+    參數優先吃 `mdx`，相容舊的 `sql` 鍵。"""
+    mdx = (args.get("mdx") or args.get("sql") or "").strip()
+    if not mdx:
+        return "❌ 未提供 MDX 查詢（請把 MDX 字串放在 `mdx` 參數）。"
 
-    print(f"📊 [Teradata SQL] {safe_sql}")
+    print(f"📊 [Essbase MDX] {mdx[:300]}{'…' if len(mdx) > 300 else ''}")
 
-    if not RUNTIME.td_configured:
-        return ("❌ Teradata 連線未設定。請在 .env 設定 FA_TD_DBCNAME / FA_TD_UID / FA_TD_PWD "
-                "（伺服器、帳號、密碼）後再查詢。")
+    if not RUNTIME.esb_configured:
+        return ("❌ Essbase 連線未設定。請在 .env 設定 FA_ESB_URI / FA_ESB_APP / FA_ESB_DB / "
+                "FA_ESB_USER / FA_ESB_PWD 後再查詢。")
     try:
-        import pyodbc  # 延遲載入：企業環境才有此驅動，開發機可不裝
-    except ImportError:
-        return "❌ 找不到 pyodbc 套件（pip install pyodbc，並安裝 Teradata ODBC 驅動）。"
-
-    conn_str = (
-        f"DRIVER={{{RUNTIME.td_driver}}};"
-        f"DBCNAME={RUNTIME.td_dbcname};"
-        f"UID={RUNTIME.td_uid};"
-        f"PWD={{{RUNTIME.td_pwd}}};"  # 大括號包密碼，避免特殊字元破壞連線字串
-        f"Authentication={RUNTIME.td_authentication};"
-        f"TMODE={RUNTIME.td_tmode};"
-    )
-    conn = None
+        from essbase_client import run_mdx_to_df, EssbaseError
+    except ImportError as e:
+        return f"❌ 無法載入 essbase_client：{e}"
     try:
-        conn = pyodbc.connect(conn_str, autocommit=True)
-        try:  # Big5 解碼防禦：防亂碼與 "not type" 錯誤；驅動不支援就跳過
-            conn.setdecoding(pyodbc.SQL_CHAR, encoding=RUNTIME.td_encoding)
-            conn.setdecoding(pyodbc.SQL_WCHAR, encoding=RUNTIME.td_encoding)
-        except Exception:  # noqa: BLE001
-            pass
-        df = pd.read_sql(safe_sql, conn)
+        df = run_mdx_to_df(mdx, raw_values=True)   # raw_values：取原始數值，最乾淨
+    except EssbaseError as e:
+        return f"❌ Essbase MDX 執行失敗：{e}"
     except Exception as e:  # noqa: BLE001
-        return f"❌ Teradata 資料庫 SQL 執行失敗，錯誤訊息：\n{e}"
-    finally:
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception:  # noqa: BLE001
-                pass
+        return f"❌ Essbase MDX 執行失敗：{e}"
 
+    # 'value' 欄改名 AMT（前端度量欄慣例）並轉數值；丟掉全 #Missing（None）的交叉格
+    if "value" in df.columns:
+        df = df.rename(columns={"value": "AMT"})
+    if "AMT" in df.columns:
+        df["AMT"] = pd.to_numeric(df["AMT"], errors="coerce")
+        df = df.dropna(subset=["AMT"])
     if df.empty:
-        return "✅ Teradata 查詢成功執行，但該條件下資料庫無符合的紀錄。"
+        return "✅ Essbase 查詢成功執行，但該條件下無資料（或全為 #Missing）。"
 
     # 數據隔離核心：完整數據落地本地快取，杜絕 Token 爆炸與 AI 幻覺
     os.makedirs(RUNTIME.cache_dir, exist_ok=True)
     csv_path = _db_csv_path()
-    # Essbase 長表 → 樞紐友善結構：把階層/時間/幣別等複合字串拆成正規維度欄
-    # （ORG_L1.., YEAR/MONTH/MONTH_NO, CURRENCY/UNIT），前端才能真正多維下鑽與正確排序。
-    from essbase import to_pivot_ready
-    pivot_df = to_pivot_ready(df)
     try:
-        pivot_df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+        df.to_csv(csv_path, index=False, encoding="utf-8-sig")
     except (PermissionError, OSError) as e:
         # Windows 常見：db_query_result.csv 正開在 Excel/其他程式 → 檔案被鎖、無法覆寫。
         # 改寫到帶時間戳的新檔，查詢照樣成功、前端讀新檔，不讓「忘了關 Excel」擋住整個查詢。
         alt = os.path.join(RUNTIME.cache_dir,
                            f"db_query_result_{time.strftime('%Y%m%d_%H%M%S')}.csv")
         print(f"   ⚠️ 無法覆寫 {csv_path}（{e}）；改存 {alt}")
-        pivot_df.to_csv(alt, index=False, encoding="utf-8-sig")
+        df.to_csv(alt, index=False, encoding="utf-8-sig")
         csv_path = alt
-    print(f"   └─ {len(pivot_df)} 筆 → 落地 {csv_path}")
-
-    # 另存一份「時間戳檢查檔」，供人工開 Excel 核對轉換結果（不被下次查詢覆蓋）
-    inspect_path = ""
-    try:
-        inspect_dir = os.path.join(RUNTIME.cache_dir, "exports")
-        os.makedirs(inspect_dir, exist_ok=True)
-        inspect_path = os.path.join(
-            inspect_dir, f"db_pivot_{time.strftime('%Y%m%d_%H%M%S')}.csv")
-        pivot_df.to_csv(inspect_path, index=False, encoding="utf-8-sig")
-        print(f"   └─ 人工檢查副本 → {os.path.abspath(inspect_path)}")
-    except Exception as e:  # noqa: BLE001  檢查副本非關鍵，失敗不影響主流程
-        print(f"   ⚠️ 檢查副本寫入失敗（不影響查詢）：{e}")
+    print(f"   └─ {len(df)} 筆 → 落地 {csv_path}")
 
     try:
         preview_md = df.head(30).to_markdown(index=False)
     except Exception:  # noqa: BLE001  缺 tabulate 時退回純文字
         preview_md = df.head(30).to_string(index=False)
 
-    inspect_note = (f"🔎 [人工檢查副本]：{os.path.abspath(inspect_path)}\n"
-                    if inspect_path else "")
+    cube = f"{RUNTIME.esb_app}.{RUNTIME.esb_db}"
     return (
-        f"✅ Teradata 查詢成功！共從 `{RUNTIME.td_table}` 撈取 {len(df)} 筆明細資料。\n\n"
-        f"【資料庫結果預覽（前 30 筆）】\n{preview_md}\n\n"
-        f"💡 [系統管線指令]：完整大數據集已安全暫存於本地快取：'{csv_path}'。\n"
-        f"{inspect_note}"
+        f"✅ Essbase 查詢成功！共從 cube `{cube}` 撈取 {len(df)} 筆資料。\n\n"
+        f"【查詢結果預覽（前 30 筆）】\n{preview_md}\n\n"
+        f"💡 [系統管線指令]：完整資料集已安全暫存於本地快取：'{csv_path}'。\n"
         f"後續若需 run_python_code 產生樞紐表或繪圖，請命令 Coder 直接讀此檔分析：\n"
         f"```python\nimport pandas as pd\ndf = pd.read_csv(r'{csv_path}')\n```\n"
         f"嚴禁模型自行硬編碼或虛構數據。\n\n"
@@ -1294,9 +1241,9 @@ def build_gather_system_prompt(plan: PlanningResult, file_list: str) -> str:
 請「直接」查資料庫，**不要**去 parse_financial_pdf 或 search_knowledge_base 解析上傳檔案（浪費時間）。
 
 【步驟】
-1. 先 get_database_schema 了解資料表與欄位。
-2. 再 run_sql_query 產生並執行 SELECT 取得數據。
-3. SQL 失敗時，依錯誤訊息與 schema 修正後重試。
+1. 先 get_database_schema 了解 cube 的維度與成員。
+2. 再 run_sql_query 產生並執行 MDX（放在 `mdx` 參數）取得數據。
+3. MDX 失敗時，依錯誤訊息與 schema 修正後重試。
 4. 取得數據後回覆「收集完成」即可。
 
 【已上傳檔案（本次與其無關，請忽略）】
@@ -1334,7 +1281,7 @@ def build_gather_system_prompt(plan: PlanningResult, file_list: str) -> str:
 【收集規則】
 1. 有上傳檔案：先對每個檔案 parse_financial_pdf（若未解析）→ 再 search_knowledge_base 撈具體數值。
 2. 跨檔案：對「每個檔案」分別 search_knowledge_base，指定 file_name。
-3. 需要歷史資料庫：先 get_database_schema 看結構 → 再 run_sql_query 產生 SELECT 取數。
+3. 需要歷史資料庫：先 get_database_schema 看 cube 結構 → 再 run_sql_query 產生 MDX 取數。
 4. 【關鍵：精準檢索】不要把多個指標、多種語言塞進同一個 search_query（會讓檢索失焦）。
    請「一個指標一次查詢」。{search_lang_rule}
    - 也務必查「Consolidated Results / Financial Summary」這類彙總表，數字通常在那裡。
@@ -1587,8 +1534,8 @@ def _gather_evidence(plan: PlanningResult, user_prompt: str,
             duration_ms = round((time.perf_counter() - t0) * 1000, 1)
 
             # 記下實際執行的 SQL（供對話記憶／使用者追問「show 出 SQL」）
-            if func_name == "run_sql_query" and args.get("sql"):
-                resp.executed_sql.append(args["sql"])
+            if func_name == "run_sql_query" and (args.get("mdx") or args.get("sql")):
+                resp.executed_sql.append(args.get("mdx") or args.get("sql"))
 
             result_str = str(result)
             # run_sql_query 把 CSV 快取路徑藏在結果尾端（out-of-band metadata）。就地攔下寫進
@@ -1604,7 +1551,7 @@ def _gather_evidence(plan: PlanningResult, user_prompt: str,
 
             # 解析類訊息（如「已完成解析」）不算證據，檢索/SQL 結果才收進證據
             if func_name in ("search_knowledge_base", "run_sql_query") or "查詢成功" in result_str:
-                evidence.append(f"【{func_name}｜{args.get('search_query') or args.get('sql') or ''}】\n"
+                evidence.append(f"【{func_name}｜{args.get('search_query') or args.get('mdx') or args.get('sql') or ''}】\n"
                                 f"{_preview(result_str, 2500)}")
 
             # 熔斷：同一工具連續吐出「一模一樣」的執行錯誤，代表是環境/系統層問題
@@ -2276,17 +2223,17 @@ _DEFAULT_TOOLS = [
         }, "required": ["thought_process", "search_query"]}}},
     {"type": "function", "function": {
         "name": "get_database_schema",
-        "description": "【查資料庫第一步】取得歷史財務資料庫(MSSQL)的結構說明（有哪些表、欄位、範例查詢）。要查資料庫前，必須先呼叫此工具了解能查什麼，再產生 SQL。",
+        "description": "【查資料庫第一步】取得 Essbase 多維 cube 的結構（維度、成員、MDX 範例）。要查資料庫前，必須先呼叫此工具了解能查什麼，再產生 MDX。",
         "parameters": {"type": "object", "properties": {
             "thought_process": {"type": "string", "description": "說明你想從資料庫查什麼、為何需要。"},
         }, "required": ["thought_process"]}}},
     {"type": "function", "function": {
         "name": "run_sql_query",
-        "description": "【查資料庫第二步】在歷史財務資料庫執行你產生的 SQL（唯讀，只允許 SELECT）。支援 T-SQL 語法。【最後手段】有上傳檔案時，應先用 parse_financial_pdf + search_knowledge_base 找答案，確實查無才查資料庫。",
+        "description": "【查資料庫第二步】在 Essbase cube 執行你產生的 MDX 查詢並回傳結果。【最後手段】有上傳檔案時，應先用 parse_financial_pdf + search_knowledge_base 找答案，確實查無才查資料庫。",
         "parameters": {"type": "object", "properties": {
             "thought_process": {"type": "string", "description": "說明這個查詢的目的，以及為何已確認需要查資料庫。"},
-            "sql": {"type": "string", "description": "要執行的 SELECT 查詢。欄位/表名請依 get_database_schema 提供的結構。"},
-        }, "required": ["thought_process", "sql"]}}},
+            "mdx": {"type": "string", "description": "要執行的 MDX 查詢。維度/成員請依 get_database_schema 提供的 cube 結構（成員寫 [維度].[成員]，FROM App.Db）。"},
+        }, "required": ["thought_process", "mdx"]}}},
     {"type": "function", "function": {
         "name": "generate_financial_table",
         "description": "把 JSON 數據渲染成專業 HTML 財務表格。",

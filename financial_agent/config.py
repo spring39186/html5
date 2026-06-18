@@ -133,6 +133,7 @@ class RuntimeConfig:
     esb_user: str = os.getenv("FA_ESB_USER", "")  # user name
     esb_pwd: str = os.getenv("FA_ESB_PWD", "")    # user password
     esb_verify_tls: bool = _bool_env("FA_ESB_VERIFY_TLS", "1")  # 自簽憑證可設 0 跳過驗證
+    esb_cafile: str = os.getenv("FA_ESB_CAFILE", "")  # 內部 CA 憑證(PEM) 路徑（保持驗證又不必設 0）
     esb_timeout: int = int(os.getenv("FA_ESB_TIMEOUT", "120"))  # 單次 MDX 請求逾時（秒）
 
     @property

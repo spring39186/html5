@@ -90,6 +90,7 @@ class EssbaseClient:
         user: Optional[str] = None,
         password: Optional[str] = None,
         verify_tls: Optional[bool] = None,
+        cafile: Optional[str] = None,
         timeout: Optional[int] = None,
         session: Any = None,
     ) -> None:
@@ -100,6 +101,7 @@ class EssbaseClient:
         self._password = str(_cfg("esb_pwd", password) or "")
         self.verify_tls = bool(_cfg("esb_verify_tls", verify_tls) if verify_tls is not None
                                else getattr(_RUNTIME, "esb_verify_tls", True))
+        self.cafile = str(_cfg("esb_cafile", cafile) or "")
         self.timeout = int(_cfg("esb_timeout", timeout) if timeout is not None
                            else getattr(_RUNTIME, "esb_timeout", 120))
 
@@ -128,6 +130,13 @@ class EssbaseClient:
         """MDX FROM 子句；此端點可省略，保留給需明寫 cube 的查詢。"""
         return f"FROM [{self.app}].[{self.db}]"
 
+    @property
+    def _verify(self):
+        """requests verify 值：關驗證→False；有自訂 CA→該 PEM 路徑；否則 True。"""
+        if not self.verify_tls:
+            return False
+        return self.cafile or True
+
     # ── session（延遲匯入 requests）────────────────────────────────────────
     def _get_session(self) -> Any:
         if self._session is None:
@@ -138,7 +147,7 @@ class EssbaseClient:
             s = requests.Session()
             s.auth = (self._user, self._password)  # HTTP Basic
             s.headers.update({"Content-Type": "application/json",
-                              "Accept": "application/json"})
+                              "Accept": "application/octet-stream"})  # 官方支援型別(+?format=JSON)
             self._session = s
         return self._session
 
@@ -163,7 +172,7 @@ class EssbaseClient:
             q.update(params)
         try:
             resp = sess.post(self.mdx_url, params=q, data=json.dumps(body),
-                             timeout=self.timeout, verify=self.verify_tls)
+                             timeout=self.timeout, verify=self._verify)
         except requests.RequestException as e:
             raise EssbaseError(f"連線 Essbase 失敗：{e}") from e
 
@@ -187,7 +196,7 @@ class EssbaseClient:
         sess = self._get_session()
         import requests
         try:
-            r = sess.get(self.db_url, timeout=self.timeout, verify=self.verify_tls)
+            r = sess.get(self.db_url, timeout=self.timeout, verify=self._verify)
         except requests.RequestException as e:
             raise EssbaseError(f"連線 Essbase 失敗：{e}") from e
         if r.status_code in (401, 403):
@@ -283,6 +292,105 @@ def mdx_to_long_df(payload: Mapping[str, Any]):
     records = mdx_to_records(payload)
     columns = list(records[0].keys()) if records else ["value"]
     return pd.DataFrame.from_records(records, columns=columns)
+
+
+# ── Agent 主用：執行 MDX → 長表（用 essbase_grid 對「真實 grid」的正確解析）────────
+
+def fetch_mdx_payload(mdx: str, *, raw_values: bool = True,
+                      timeout: Optional[int] = None) -> Dict[str, Any]:
+    """用 urllib（已對真實 cube 驗證可用）POST 一段 MDX，回原始 JSON dict。
+
+    對應本 cube 實況：HTTPS + `Accept: application/octet-stream` + `?format=JSON`、
+    TLS 關驗證 / 自訂 CA、以及罕見的 HTTP/0.9 串流後援。連線參數讀 config.RUNTIME。
+    任何失敗丟 EssbaseError。
+    """
+    import base64
+    import http.client
+    import ssl
+    import urllib.error
+    import urllib.request
+
+    r = _RUNTIME
+    base = str(getattr(r, "esb_uri", "") or "").rstrip("/")
+    app = str(getattr(r, "esb_app", "") or "")
+    db = str(getattr(r, "esb_db", "") or "")
+    user = str(getattr(r, "esb_user", "") or "")
+    pwd = str(getattr(r, "esb_pwd", "") or "")
+    verify = bool(getattr(r, "esb_verify_tls", True))
+    cafile = str(getattr(r, "esb_cafile", "") or "") or None
+    timeout = int(timeout if timeout is not None else getattr(r, "esb_timeout", 120))
+
+    missing = [k for k, v in (("FA_ESB_URI", base), ("FA_ESB_APP", app),
+                              ("FA_ESB_DB", db), ("FA_ESB_USER", user),
+                              ("FA_ESB_PWD", pwd)) if not v]
+    if missing:
+        raise EssbaseError("Essbase 連線未設定，缺少：" + ", ".join(missing)
+                           + "（請填 .env 或環境變數）")
+
+    url = f"{base}/applications/{app}/databases/{db}/mdx?format=JSON"
+    body = json.dumps({
+        "query": mdx.strip(),
+        "preferences": {"dataless": False,
+                        "formatValues": not raw_values,
+                        "formatString": not raw_values,
+                        "memberIdentifierType": "NAME"},
+    }, ensure_ascii=False).encode("utf-8")
+    token = base64.b64encode(f"{user}:{pwd}".encode("utf-8")).decode("ascii")
+    headers = {"Content-Type": "application/json",
+               "Accept": "application/octet-stream",
+               "Authorization": f"Basic {token}"}
+
+    ctx = ssl.create_default_context()
+    if not verify:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    elif cafile:
+        try:
+            ctx.load_verify_locations(cafile=cafile)
+        except OSError as e:
+            raise EssbaseError(f"FA_ESB_CAFILE 無法載入（需 PEM 格式）：{e}") from e
+
+    req = urllib.request.Request(url, data=body, method="POST")
+    for k, v in headers.items():
+        req.add_header(k, v)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+            text = resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        code = e.code
+        detail = (e.read().decode("utf-8", "replace") if e.fp else "")[:300]
+        if code in (401, 403):
+            raise EssbaseError(f"認證/授權失敗(HTTP {code})：請確認帳密與該帳號對 "
+                               f"{app}.{db} 的權限") from e
+        raise EssbaseError(f"Essbase 回應 HTTP {code}：{detail}") from e
+    except http.client.HTTPException:
+        # 罕見：伺服器回 HTTP/0.9 串流（無標頭）→ 用 smoketest 的 raw-socket 後援
+        try:
+            from essbase_smoketest import raw_http_request
+            _code, _ct, text = raw_http_request(url, headers, body, timeout=timeout,
+                                                verify=verify, cafile=cafile)
+        except Exception as e:  # noqa: BLE001
+            raise EssbaseError(f"Essbase 回應無法解析（HTTP/0.9 後援亦失敗）：{e}") from e
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        raise EssbaseError(f"連線 Essbase 失敗：{e}") from e
+
+    try:
+        return json.loads(text)
+    except ValueError as e:
+        raise EssbaseError(f"Essbase 回應非 JSON：{_short(text)}") from e
+
+
+def run_mdx_to_df(mdx: str, *, raw_values: bool = True):
+    """執行 MDX → 用 essbase_grid.parse_mdx_grid（真實 grid 的正確解析）攤成長表 DataFrame。
+
+    回傳欄位 = 各維度名（列維 + 欄維）+ 'value'；df.attrs 帶 row/column/page 維度名。
+    raw_values=True 取原始數值（formatValues/formatString off），給前端/pandas 最乾淨。
+    """
+    if not mdx or not mdx.strip():
+        raise EssbaseError("MDX 不可為空")
+    payload = fetch_mdx_payload(mdx, raw_values=raw_values)
+    import essbase_grid as eg
+    return eg.to_long_df(payload)
 
 
 # ── CLI 煙霧測試 ───────────────────────────────────────────────────────────

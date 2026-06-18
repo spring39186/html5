@@ -68,16 +68,31 @@ Future financial-data queries should target the **Essbase multidimensional cube*
 - `financial_agent/tests/test_essbase_grid.py` — offline tests (6, pass).
 - Next (when asked): wire into agent / `EssbaseClient`.
 
-### Remaining touchpoints (NOT done — do only when asked)
-- `financial_agent/essbase.py` — `to_pivot_ready` reshaping; can consume
-  `mdx_to_long_df()` output once wired.
-- `financial_agent/agent.py` — DB schema tool (~L836) still describes the
-  "Teradata（Essbase 多維寬表）" structure; DB-query tool (~L2279) still targets
-  MSSQL. Swap these to call `EssbaseClient` when migrating the agent.
-- `financial_agent/config.py` — `mcp_args` still defaults to `mcp_server_mssql.py`.
+### Agent wiring — DONE (Teradata → Essbase in the main line)
+- `financial_agent/essbase_client.py` — added **`fetch_mdx_payload()`** (urllib,
+  the proven path: HTTPS + `Accept: application/octet-stream` + `?format=JSON`,
+  verify/cafile, HTTP/0.9 raw-socket fallback) and **`run_mdx_to_df()`** (parses
+  via `essbase_grid.parse_mdx_grid`, returns long df + `value`). Fixed the
+  requests `Accept` header → octet-stream; added `cafile`/`_verify`.
+- `financial_agent/agent.py` — `get_database_schema` now describes the **Essbase
+  cube + MDX** (dims/members + example MDX); `run_sql_query` (name kept to avoid
+  re-routing) now runs **MDX** via `run_mdx_to_df` — reads `args["mdx"]` (falls
+  back to `sql`), renames `value`→`AMT`, drops the SQL injection / pyodbc /
+  `to_pivot_ready` path, keeps the CSV-cache + `_CSV_CACHE_MARKER` contract.
+  Removed top-level `import pyodbc`. Tool schemas updated in `agent.py`
+  (`_DEFAULT_TOOLS`) **and** `AgentTools.json` (`sql`→`mdx`, MSSQL→Essbase).
+- `financial_agent/config.py` — added `esb_cafile`. `td_*` kept dormant (unused).
 
-> Status: connection **VERIFIED against the live cube** (smoketest returns real
-> data); the real grid shape is now known and parsed by `essbase_grid.parse_mdx_grid`
-> (the older `essbase_client.mdx_to_records` assumed a different shape — rework when
-> wiring). A Streamlit pivot/treemap demo (`essbase_pivot_app.py`) consumes it.
-> Still **not wired into the agent** (agent.py DB tools untouched — do when asked).
+### Still NOT switched (only if asked)
+- `financial_agent/essbase.py` `to_pivot_ready` — Teradata-wide-table reshaper,
+  no longer called by the agent (Essbase long table is already tidy).
+- MCP path: `config.mcp_args` still `mcp_server_mssql.py`; **off by default**
+  (`FA_USE_MCP=0`), so the local Essbase tools are active. Turning MCP on would
+  need an Essbase MCP server.
+
+> Status: connection **VERIFIED against the live cube**; real grid shape parsed by
+> `essbase_grid.parse_mdx_grid` (incl. multi-dim column axis / Crossjoin).
+> **Agent main line now queries Essbase via MDX** (`run_sql_query`→`run_mdx_to_df`),
+> Teradata/MSSQL path retired. Streamlit pivot demo (`essbase_pivot_app.py`) +
+> AgGrid tree consume the same parser. Not yet run end-to-end through the live
+> agent on the user's box (offline-validated: compiles, JSON tools, 15 unit tests).

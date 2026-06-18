@@ -49,7 +49,7 @@
         "type": "function",
         "function": {
             "name": "get_database_schema",
-            "description": "【查資料庫第一步】取得歷史財務資料庫(Microsoft SQL Server)的結構說明：有哪些資料表、欄位、型別與範例查詢。要查資料庫前，必須先呼叫此工具了解可查詢的內容，再據以產生正確的 SQL。",
+            "description": "【查資料庫第一步】取得 Essbase 多維 cube 的結構：有哪些維度、主要成員與 MDX 範例。要查資料庫前，必須先呼叫此工具了解可查詢的內容，再據以產生正確的 MDX。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -66,7 +66,7 @@
         "type": "function",
         "function": {
             "name": "run_sql_query",
-            "description": "【查資料庫第二步】在歷史財務資料庫執行你產生的 SQL 查詢並回傳結果。唯讀，只允許單一 SELECT/WITH 查詢，支援 T-SQL 語法（如 TOP n、dbo. 前綴）。【最後手段】若有上傳檔案，應先用 parse_financial_pdf + search_knowledge_base 從檔案找答案，確實查無時才查資料庫。",
+            "description": "【查資料庫第二步】在 Essbase cube 執行你產生的 MDX 查詢並回傳結果。【最後手段】若有上傳檔案，應先用 parse_financial_pdf + search_knowledge_base 從檔案找答案，確實查無時才查資料庫。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -74,12 +74,12 @@
                         "type": "string",
                         "description": "說明：(1) 這個查詢的目的；(2) 為何已確認需要查資料庫（而非檔案）。"
                     },
-                    "sql": {
+                    "mdx": {
                         "type": "string",
-                        "description": "要執行的 SELECT 查詢。資料表與欄位名稱請依 get_database_schema 回傳的結構（例如：SELECT c.company_name, f.fiscal_year, f.revenue FROM dbo.fact_financials f JOIN dbo.dim_company c ON f.company_id=c.company_id WHERE c.ticker='2330'）。"
+                        "description": "要執行的 MDX 查詢。維度/成員請依 get_database_schema 回傳的 cube 結構（成員寫 [維度].[成員]、FROM App.Db；例：SELECT { [Currency].[NTD K] } ON COLUMNS, { Descendants([Sector Total], 1, SELF_AND_BEFORE) } ON ROWS FROM VSalRPTH.SaleRPTA）。"
                     }
                 },
-                "required": ["thought_process", "sql"]
+                "required": ["thought_process", "mdx"]
             }
         }
     },

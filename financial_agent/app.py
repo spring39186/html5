@@ -202,6 +202,26 @@ def _measure_additivity(df: pd.DataFrame, mcol):
     return ("avg" if non_add else "sum"), non_add
 
 
+def _widen_by_measure(df: pd.DataFrame, mcol):
+    """把 long 的 `Measure` 欄攤成寬：每個度量成員各成一個數值欄（值取自 mcol）。回傳
+    (新df, [度量欄名])。讓 AgGrid 能對每個度量「各設各的聚合」（加總型 Sum、% 型 Average）——
+    單一值欄做不到逐度量不同聚合。不適用或任何 pandas 例外 → 回 (原df, [])，呼叫端安全退回。"""
+    if "Measure" not in df.columns or mcol in (None, "Measure") or mcol not in df.columns:
+        return df, []
+    try:
+        idx = [c for c in df.columns if c not in ("Measure", mcol)]
+        if not idx:
+            return df, []
+        measures = list(dict.fromkeys(str(m) for m in df["Measure"]))   # 保序去重
+        wide = df.pivot_table(index=idx, columns="Measure", values=mcol,
+                              aggfunc="first", dropna=False, observed=True)
+        wide.columns = [str(c) for c in wide.columns]
+        wide = wide.reset_index()
+        return wide, [m for m in measures if m in wide.columns]
+    except Exception:  # noqa: BLE001
+        return df, []
+
+
 @st.cache_data(show_spinner=False)
 def _pivot_html(csv_path: str, mtime: float) -> str:
     """產生 PivotTableJS HTML，以 (路徑, mtime) 快取——pivot_ui 建表很貴，
@@ -240,7 +260,24 @@ def _render_essbase_aggrid(df: pd.DataFrame):
         st.caption("💡 安裝 `streamlit-aggrid` 可解鎖多層級群組展開功能。")
         return
 
-    gob = GridOptionsBuilder.from_dataframe(df)
+    try:
+        from essbase_grid import measure_is_additive
+    except Exception:  # noqa: BLE001
+        def measure_is_additive(_n):
+            return True
+
+    mcol = _measure_col(df)   # 度量欄用偵測，不再寫死 AMT
+    agg, non_add = _measure_additivity(df, mcol)   # 在 long（含 Measure 欄）上判斷
+    # Measure 在軸上（有 Measure 欄）→ 攤成「逐度量一欄」，AgGrid 才能對各度量各設聚合
+    # （如 Current=Sum、Current %=Average 同時並存）。單一度量／無 Measure 欄則不動。
+    measure_cols = []
+    if "Measure" in df.columns:
+        df, measure_cols = _widen_by_measure(df, mcol)
+    if non_add:
+        st.caption(f"⚠️ 度量 {('、'.join(non_add))} 為比率／百分比，父層以**平均**呈現（非加總，"
+                   "且僅為近似）；精確值請展開到最末層（葉節點）檢視。")
+
+    gob = GridOptionsBuilder.from_dataframe(df)   # 注意：建在（可能已攤平的）df 上
     gob.configure_pagination(paginationAutoPageSize=False, paginationPageSize=15)
     gob.configure_side_bar()
     gob.configure_default_column(groupable=True, value=True, enableRowGroup=True,
@@ -253,26 +290,24 @@ def _render_essbase_aggrid(df: pd.DataFrame):
     org_levels = sorted((c for c in df.columns if re.fullmatch(r"ORG_L\d+", c)),
                         key=lambda c: int(c[5:]))
     group_cols = lv_levels or org_levels
-    mcol = _measure_col(df)   # 度量欄用偵測，不再寫死 AMT
-    agg, non_add = _measure_additivity(df, mcol)   # % 等非加總度量 → 父層用 avg、不 Sum
-    if non_add:
-        st.caption(f"⚠️ 度量 {('、'.join(non_add))} 為比率／百分比，父層改顯示**平均**而非加總；"
-                   "精確值請展開到最末層（葉節點）檢視。")
     if group_cols:
         for col in group_cols:
             gob.configure_column(col, rowGroup=True, hide=True)
-        if mcol is not None and mcol in df.columns:   # 父層（如 Sector Total）= 旗下明細聚合
-            gob.configure_column(mcol, aggFunc=agg, enableValue=True,
-                                 type=["numericColumn"])
+        # 值欄聚合：攤平後逐度量各設 Sum/Average；否則單一值欄（可能是 WHERE 的真實度量名）
+        value_cols = measure_cols or ([mcol] if mcol and mcol in df.columns else [])
+        for vc in value_cols:   # 父層（如 Sector Total）= 旗下明細，依該度量可否加總
+            gob.configure_column(vc, aggFunc=("sum" if measure_is_additive(vc) else "avg"),
+                                 enableValue=True, type=["numericColumn"])
         grid_opts = dict(
             groupDefaultExpanded=1,   # 預設展開第一層（總計→明細直接看到）
             autoGroupColumnDef={"headerName": "階層", "minWidth": 240,
                                 "cellRendererParams": {"suppressCount": False}})
         if lv_levels:
-            # Essbase 欄維度（非 Lv／非度量欄，如 Currency）→ 樞紐欄：多幣別 NTD K|USD K
-            # 各自成欄、父層各幣別分開加總（不再混幣）。單一幣別時就只出現一個欄群組。
+            # 其餘欄維度（非 Lv／非值欄，如 Currency）→ 樞紐欄：多幣別 NTD K|USD K 各自成欄、
+            # 父層各幣別分開聚合（不再混幣）。單一幣別就只出現一個欄群組。
+            value_set = set(value_cols)
             pivot_cols = [c for c in df.columns
-                          if c != mcol and not re.fullmatch(r"Lv\d+", c)]
+                          if c not in value_set and not re.fullmatch(r"Lv\d+", c)]
             for c in pivot_cols:
                 gob.configure_column(c, pivot=True)
             if pivot_cols:

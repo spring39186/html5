@@ -963,21 +963,55 @@ def _expand_row_hierarchy(df, row_dims, cube_id):
 
 
 def _normalize_mdx(mdx: str) -> str:
-    """把『一定錯』的 MDX 寫法就地修正，提升模型產 MDX 的可靠度（有修就印紀錄）。
-
-    目前處理一個明確案例：`[Time].[<成員>].Members`——在本 cube 它會回傳 **Period 屬性維**
-    的所有層級（`01`–`12`＋`H1`/`H2`＋`Q1`–`Q4`＋根＋一個空成員），**不是**該年 12 個月；
-    改成 `Descendants([Time].[<成員>], LEAVES)`（乾淨月葉 `2018/01…12`）。
-    `成員.Members` 本就非標準 MDX（`.Members` 應接維度/層級），故此改寫不會誤傷正常查詢。"""
+    """把『一定錯』的 MDX 寫法就地修正——模型太弱、指南常被忽略時的硬保險（有修就印紀錄）。
+    每條都是「不修就一定失敗或回錯資料」的明確樣式，故不會誤傷正常查詢：
+      · `[Measures]` → `[Measure]`（本 cube 維度名是單數）
+      · `[Department]`／`[Sector]` → `[Sector Total]`（部門維度的真名）
+      · 去掉 SSAS 的 `.[All…]` 成員（Essbase 沒有 All；頂層成員本身即合計）
+      · `[Time].[<年>].Members` → `Descendants([Time].[<年>], 3, SELF)`（前者會跑出 Period 屬性全層級）
+      · `Descendants([Time].[<年>], LEAVES)` → `…, 3, SELF`（**本 cube 不支援 LEAVES**）
+      · Measure 成員不在 outline（如亂寫 `Sales Amount`/`Sales`）→ 退成 `[Measure].[Current]`（本期值）"""
     import re
     if not mdx:
         return mdx
-    new = re.sub(r"\[Time\]\s*\.\s*\[([^\]]+)\]\s*\.\s*Members",
-                 lambda m: f"Descendants([Time].[{m.group(1)}], LEAVES)", mdx,
-                 flags=re.IGNORECASE)
-    if new != mdx:
-        print("   🔧 MDX 自動修正：[Time].[…].Members → Descendants([Time].[…], LEAVES)（取乾淨 12 月葉）")
-    return new
+    fixes = []
+
+    def _apply(pattern, repl, label):
+        nonlocal mdx
+        new, n = re.subn(pattern, repl, mdx, flags=re.IGNORECASE)
+        if n:
+            mdx = new
+            fixes.append(label)
+
+    _apply(r"\[Measures\]", "[Measure]", "[Measures]→[Measure]")
+    _apply(r"\[(?:Department|Sector)\]", "[Sector Total]", "[Department]→[Sector Total]")
+    _apply(r"\.\s*\[All\b[^\]]*\]", "", "移除 .[All…]")
+    _apply(r"\[Time\]\s*\.\s*\[(\d{4})\]\s*\.\s*Members",
+           r"Descendants([Time].[\1], 3, SELF)", "[Time].[年].Members→3,SELF")
+    _apply(r"(Descendants\(\s*\[Time\]\s*\.\s*\[\d{4}\]\s*,\s*)LEAVES(\s*\))",
+           r"\g<1>3, SELF\g<2>", "Time LEAVES→3,SELF")
+
+    # Measure 成員校驗：不在 outline 的（Sales Amount/Sales…）→ 預設本期值 [Measure].[Current]
+    try:
+        import essbase_grid as eg
+        cube_id = (f"{RUNTIME.esb_app}.{RUNTIME.esb_db}"
+                   if getattr(RUNTIME, "esb_configured", False) else None)
+        pm = eg.load_parent_map(dimension="Measure", cube=cube_id)
+        valid = {m for m in (set(pm) | set(pm.values())) if m}
+        if valid:
+            new, n = re.subn(
+                r"\[Measure\]\s*\.\s*\[([^\]]+)\]",
+                lambda mt: mt.group(0) if mt.group(1).strip() in valid else "[Measure].[Current]",
+                mdx)
+            if new != mdx:
+                mdx = new
+                fixes.append("無效 Measure→[Current]")
+    except Exception:  # noqa: BLE001
+        pass
+
+    if fixes:
+        print(f"   🔧 MDX 自動修正：{'；'.join(fixes)}")
+    return mdx
 
 
 def run_sql_query(args: dict, file_registry: dict) -> str:

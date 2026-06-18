@@ -182,6 +182,26 @@ def _measure_col(df: pd.DataFrame):
     return df.columns[-1] if len(df.columns) else None
 
 
+def _measure_additivity(df: pd.DataFrame, mcol):
+    """回傳 (agg, non_additive)：agg ∈ {'sum','avg'}，non_additive=不可加總的度量名清單。
+
+    度量身分來源——`Measure` 欄（度量在軸上）優先，否則用數值欄名（度量在 WHERE 時後端
+    已把欄名設成真實度量名）。任一度量是 %／比率（見 essbase_grid.measure_is_additive）就
+    改用 Average，避免把百分比亂加成垃圾。判斷不出（缺 essbase_grid）時保守回 sum。"""
+    try:
+        from essbase_grid import measure_is_additive
+    except Exception:  # noqa: BLE001
+        return "sum", []
+    if "Measure" in df.columns:
+        measures = [str(m) for m in df["Measure"].unique()]
+    elif mcol is not None:
+        measures = [str(mcol)]
+    else:
+        measures = []
+    non_add = [m for m in measures if not measure_is_additive(m)]
+    return ("avg" if non_add else "sum"), non_add
+
+
 @st.cache_data(show_spinner=False)
 def _pivot_html(csv_path: str, mtime: float) -> str:
     """產生 PivotTableJS HTML，以 (路徑, mtime) 快取——pivot_ui 建表很貴，
@@ -195,9 +215,11 @@ def _pivot_html(csv_path: str, mtime: float) -> str:
     os.makedirs("temp_dir", exist_ok=True)
     # 注意：pivottablejs.pivot_ui 的輸出參數叫 outfile_path（不是 outfile）。
     # 傳錯名會被 **kwargs 吃掉、實際寫到預設的 pivottablejs.html，導致下方 open(tmp) 找不到檔。
-    # 預設就以「Sum of <度量欄>」開場（aggregatorName=Sum, vals=[度量欄]），使用者再自行拖維度；
-    # 否則 PivotTableJS 預設是 Count，會讓人以為數值不能加總。
-    pivot_kwargs = ({"aggregatorName": "Sum", "vals": [mcol]}
+    # 預設就以「Sum/Average of <度量欄>」開場，使用者再自行拖維度；否則 PivotTableJS 預設
+    # 是 Count，會讓人以為數值不能加總。% 等非加總度量改用 Average（不亂加成垃圾）。
+    agg, _ = _measure_additivity(df, mcol)
+    agg_name = "Average" if agg == "avg" else "Sum"
+    pivot_kwargs = ({"aggregatorName": agg_name, "vals": [mcol]}
                     if mcol is not None and pd.api.types.is_numeric_dtype(df[mcol]) else {})
     pivot_ui(df, outfile_path=tmp, **pivot_kwargs)
     try:
@@ -232,11 +254,15 @@ def _render_essbase_aggrid(df: pd.DataFrame):
                         key=lambda c: int(c[5:]))
     group_cols = lv_levels or org_levels
     mcol = _measure_col(df)   # 度量欄用偵測，不再寫死 AMT
+    agg, non_add = _measure_additivity(df, mcol)   # % 等非加總度量 → 父層用 avg、不 Sum
+    if non_add:
+        st.caption(f"⚠️ 度量 {('、'.join(non_add))} 為比率／百分比，父層改顯示**平均**而非加總；"
+                   "精確值請展開到最末層（葉節點）檢視。")
     if group_cols:
         for col in group_cols:
             gob.configure_column(col, rowGroup=True, hide=True)
-        if mcol is not None and mcol in df.columns:   # 父層（如 Sector Total）= 旗下明細加總
-            gob.configure_column(mcol, aggFunc="sum", enableValue=True,
+        if mcol is not None and mcol in df.columns:   # 父層（如 Sector Total）= 旗下明細聚合
+            gob.configure_column(mcol, aggFunc=agg, enableValue=True,
                                  type=["numericColumn"])
         grid_opts = dict(
             groupDefaultExpanded=1,   # 預設展開第一層（總計→明細直接看到）
@@ -265,6 +291,11 @@ def _render_essbase_pivotjs(csv_path: str, mtime: float):
     if not HAS_ADVANCED_GRID:
         st.warning("請先安裝 `streamlit-pivottablejs`（pip install streamlit-pivottablejs）。")
         return
+    df = _load_db_csv(csv_path, mtime)
+    _, non_add = _measure_additivity(df, _measure_col(df))
+    if non_add:
+        st.caption(f"⚠️ 度量 {('、'.join(non_add))} 為比率／百分比，預設改用 **Average**（非加總）；"
+                   "可在表內自行改聚合方式。")
     components.html(_pivot_html(csv_path, mtime), height=600, scrolling=True)
 
 

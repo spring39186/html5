@@ -903,6 +903,28 @@ def _mdx_dim_hint() -> str:
             "維度/成員名請完全照 get_database_schema 的 outline（勿自創如 [Sector]/[Department]）。")
 
 
+def _measures_in_mdx(mdx, cube_id):
+    """掃 MDX 文字，回傳其中出現的 Measure 維成員（依 outline）。用在 Measure 放 WHERE 時，
+    取出「單一固定度量」的真實名稱來當數值欄名，讓前端據此判斷可否加總。比對到的短名若是
+    另一個同樣出現之長名的子字串（'Current' ⊂ 'Current %'）就濾掉；命中多個則全回傳，
+    由呼叫端決定（只有剛好一個時才採用）。找不到 outline／無命中回 []。"""
+    if not mdx:
+        return []
+    try:
+        import essbase_grid as eg
+        pmap = eg.load_parent_map(dimension="Measure", cube=cube_id)
+    except Exception:  # noqa: BLE001
+        return []
+    members = {m for m in (set(pmap) | set(pmap.values())) if m and m != "Measure"}
+    # 優先抓帶括號的精確寫法 [成員]：避免 'Current' 誤中 [Time].CurrentMember 之類；
+    # 也讓 [Current] 與 [Current %] 各自獨立、不互相吃字。括號版抓不到才退回裸名子字串。
+    hit = [m for m in members if f"[{m}]" in mdx]
+    if not hit:
+        hit = [m for m in members if m in mdx]
+        hit = [m for m in hit if not any(o != m and m in o and o in mdx for o in hit)]
+    return sorted(set(hit))
+
+
 def _expand_row_hierarchy(df, row_dims, cube_id):
     """單一列維度時，依 outline 把列成員展開成 Lv1..LvN 階層欄（取代原維度欄），並丟掉
     內部（父）節點列以免群組重複加總——前端 AgGrid 就能樹狀展開、總計當父層、明細縮排。
@@ -969,16 +991,21 @@ def run_sql_query(args: dict, file_registry: dict) -> str:
     row_dims = list(df.attrs.get("row", []))
     cube_id = f"{RUNTIME.esb_app}.{RUNTIME.esb_db}" if RUNTIME.esb_configured else None
 
-    # 數值欄：Essbase 解析器叫它 'value'。改成中性的 'Value'，不再硬掛 Teradata 的
-    # 「AMT＝金額」——度量可能是 %／變動／比率，不一定是金額。前端改用「偵測數值欄」
-    # 而非寫死欄名，所以換名不會壞。度量本身的名字：當 Measure 維放在軸上時，其成員
-    # 已自成一欄（如 Measure=毛利率%），不必另存；放在 WHERE 時則為單一固定度量。
-    MEASURE_COL = "Value"
+    # 數值欄命名（Essbase 解析器原本叫它 'value'）：
+    #   · Measure 維在 WHERE（未上軸）且只有單一度量 → 直接用「真實度量名」當欄名，
+    #     前端就能據此判斷該度量可否加總（如 'Current %' 不可 Sum、'Current' 可）。
+    #   · 否則用中性 'Value'（度量在軸上時其成員已自成 Measure 欄，由前端讀該欄判斷）。
+    # 不再硬掛 Teradata 的「AMT＝金額」；前端用「偵測數值欄」抓欄，換名不會壞。
+    measure_col = "Value"
+    if "value" in df.columns and "Measure" not in df.columns:
+        single = _measures_in_mdx(mdx, cube_id)
+        if len(single) == 1:
+            measure_col = single[0]
     if "value" in df.columns:
-        df = df.rename(columns={"value": MEASURE_COL})
-    if MEASURE_COL in df.columns:
-        df[MEASURE_COL] = pd.to_numeric(df[MEASURE_COL], errors="coerce")
-        df = df.dropna(subset=[MEASURE_COL])
+        df = df.rename(columns={"value": measure_col})
+    if measure_col in df.columns:
+        df[measure_col] = pd.to_numeric(df[measure_col], errors="coerce")
+        df = df.dropna(subset=[measure_col])
     if df.empty:
         return "✅ Essbase 查詢成功執行，但該條件下無資料（或全為 #Missing）。"
 

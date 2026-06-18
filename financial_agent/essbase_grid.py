@@ -157,6 +157,23 @@ def member_path(member: str, parent_map: dict[str, str]) -> list[str]:
     return list(reversed(chain))
 
 
+def measure_is_additive(name) -> bool:
+    """Measure（Accounts）維成員可否跨成員加總（Sum）。
+
+    依 essbase_outline.*.md 的 Measure 成員與 formula 歸納：
+    - 名稱含 ``%`` → 比率／百分比（如 ``Current %``、``C/L %``）→ **不可加總**。
+    - 以 ``_D`` 結尾 → 分母／總計參照（如 ``Current_D = (Sector Total, Current)``，
+      每列都等於總計）→ **不可加總**。
+    - 其餘（``Current``/``OP``/金額、``Current YTD``、``C/L Variance`` 等差額）→ 可加總。
+
+    給前端決定父層／樞紐預設要 Sum 還是 Average，避免把 % 亂加成垃圾數字。
+    純名稱判斷，換 cube 時若新增比率成員，照同規則命名即可自動涵蓋。"""
+    n = str(name).strip()
+    if not n:
+        return True
+    return ("%" not in n) and (not n.endswith("_D"))
+
+
 def outline_summary(csv_path: str | None = None, max_children: int = 12,
                     cube: str | None = None) -> str:
     """從 parent/child 建檔產生「維度 → 頂層成員 + 直接子成員 + 成員數」的精簡 markdown 摘要。

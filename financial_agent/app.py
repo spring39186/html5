@@ -242,7 +242,7 @@ def _widen_by_measure(df: pd.DataFrame, mcol):
 def _pivot_html(csv_path: str, mtime: float) -> str:
     """產生 PivotTableJS HTML，以 (路徑, mtime) 快取——pivot_ui 建表很貴，
     避免每次 rerun 都為每則 DB 訊息重建一次。"""
-    df = _load_db_csv(csv_path, mtime).reset_index(drop=True)  # reset_index 避免 pivot 帶出 index 欄
+    df = _load_db_csv(csv_path, mtime).reset_index(drop=True)
     # 保險：度量欄強制數值（後端已轉，但歷史舊快取可能仍是字串）→ 讓樞紐能 Sum
     mcol = _measure_col(df)
     if mcol is not None and mcol in df.columns:
@@ -263,6 +263,12 @@ def _pivot_html(csv_path: str, mtime: float) -> str:
     cols = others if levels else others[1:]
     pivot_kwargs = ({"aggregatorName": agg_name, "vals": [mcol], "rows": rows, "cols": cols}
                     if mcol is not None and pd.api.types.is_numeric_dtype(df[mcol]) else {})
+    # ⚠️ pivot_ui 內部是 `df.to_csv()`（**含 index**）；無名的 RangeIndex 會被序列化成一個
+    # 空欄名的欄 → PivotTableJS 在瀏覽器把它顯示成一個叫 'null' 的欄位（這就是「每次測都有
+    # null」的真兇，且 reset_index(drop=True) 擋不掉）。解法：把第一欄設成 index，序列化時首欄
+    # 就帶欄名、沒有空欄 → 不再冒出 null 欄位。
+    if len(df.columns) > 1:
+        df = df.set_index(df.columns[0])
     pivot_ui(df, outfile_path=tmp, **pivot_kwargs)
     try:
         with open(tmp, "r", encoding="utf-8") as f:

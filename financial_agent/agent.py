@@ -1007,6 +1007,13 @@ def run_sql_query(args: dict, file_registry: dict) -> str:
     if measure_col in df.columns:
         df[measure_col] = pd.to_numeric(df[measure_col], errors="coerce")
         df = df.dropna(subset=[measure_col])
+    # 丟掉「維度全空白」的列：Essbase grid 偶爾回傳成員名為空的結構列／總計列（值常為 0，
+    # 躲過上面的 dropna），不丟的話前端 PivotTableJS 會把空成員顯示成一個叫 'null' 的列/欄桶。
+    dim_cols = [c for c in df.columns if c != measure_col]
+    if dim_cols:
+        blank = df[dim_cols].apply(
+            lambda s: s.isna() | s.astype(str).str.strip().isin(["", "nan", "None", "null", "#Missing"]))
+        df = df[~blank.all(axis=1)]
     if df.empty:
         return "✅ Essbase 查詢成功執行，但該條件下無資料（或全為 #Missing）。"
 

@@ -208,13 +208,23 @@ def _render_essbase_aggrid(df: pd.DataFrame):
     gob.configure_side_bar()
     gob.configure_default_column(groupable=True, value=True, enableRowGroup=True,
                                  filter=True, sortable=True)
-    # ⚡ Essbase 組織層級樹狀群組：優先用後端展開好的 ORG_L1..Ln 逐層下鑽；
-    # 沒有（舊資料）才退回用原始 PARENT/CHILD 整串路徑分組。
+    # ⚡ 樹狀群組：優先用後端依 outline 展開好的階層欄逐層下鑽——
+    #   Essbase 列維度 → Lv1..LvN（如 Sector Total → Assy/Test…）；
+    #   舊 Teradata 寬表 → ORG_L1..Ln；都沒有才退回原始 PARENT/CHILD 整串路徑。
+    lv_levels = sorted((c for c in df.columns if re.fullmatch(r"Lv\d+", c)),
+                       key=lambda c: int(c[2:]))
     org_levels = sorted((c for c in df.columns if re.fullmatch(r"ORG_L\d+", c)),
                         key=lambda c: int(c[5:]))
-    if org_levels:
-        for col in org_levels:
+    group_cols = lv_levels or org_levels
+    if group_cols:
+        for col in group_cols:
             gob.configure_column(col, rowGroup=True, hide=True)
+        if "AMT" in df.columns:   # 父層（如 Sector Total）= 旗下明細加總
+            gob.configure_column("AMT", aggFunc="sum", type=["numericColumn"])
+        gob.configure_grid_options(
+            groupDefaultExpanded=1,   # 預設展開第一層（總計→明細直接看到）
+            autoGroupColumnDef={"headerName": "階層", "minWidth": 240,
+                                "cellRendererParams": {"suppressCount": False}})
     elif "PARENT_SITE_ORG" in df.columns and "CHILD_SITE_ORG" in df.columns:
         gob.configure_column("PARENT_SITE_ORG", rowGroup=True, hide=True)
         gob.configure_column("CHILD_SITE_ORG", rowGroup=True, hide=True)

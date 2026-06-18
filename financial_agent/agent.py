@@ -903,6 +903,42 @@ def _mdx_dim_hint() -> str:
             "維度/成員名請完全照 get_database_schema 的 outline（勿自創如 [Sector]/[Department]）。")
 
 
+def _expand_row_hierarchy(df, row_dims, cube_id):
+    """單一列維度時，依 outline 把列成員展開成 Lv1..LvN 階層欄（取代原維度欄），並丟掉
+    內部（父）節點列以免群組重複加總——前端 AgGrid 就能樹狀展開、總計當父層、明細縮排。
+    缺 outline / 多列維 / 無真正階層時原樣返回（保持平面），對任意查詢都安全。"""
+    if len(row_dims) != 1:
+        return df
+    rdim = row_dims[0]
+    if rdim not in df.columns:
+        return df
+    try:
+        import essbase_grid as eg
+        pmap = eg.load_parent_map(dimension=rdim, cube=cube_id)
+    except Exception:  # noqa: BLE001
+        pmap = {}
+    if not pmap:
+        return df
+
+    members = df[rdim].astype(str)
+    present = set(members)
+    # 內部節點＝是「集合內其他成員」的父 → 丟掉，群組總計交給 AgGrid 由葉加總（避免重複計）
+    internal = {pmap.get(m, "") for m in present} & present
+    leaves = present - internal
+    if leaves and internal:
+        df = df[members.isin(leaves)].copy()
+        members = df[rdim].astype(str)
+
+    paths = members.map(lambda m: eg.member_path(m, pmap))
+    maxd = int(paths.map(len).max()) if len(paths) else 0
+    if maxd <= 1:
+        return df                                      # 無真正階層 → 維持平面
+    for i in range(maxd):
+        df.insert(i, f"Lv{i + 1}",
+                  paths.map(lambda p, _i=i: p[_i] if _i < len(p) else ""))
+    return df.drop(columns=[rdim])                     # 用 Lv 欄取代同名易混淆的維度欄
+
+
 def run_sql_query(args: dict, file_registry: dict) -> str:
     """執行模型生成的 MDX 於 Essbase cube：essbase_client（已驗證連線 + essbase_grid 正確解析）
     攤成長表，完整落地為 utf-8-sig CSV（數據隔離），只回前 30 筆 Markdown 預覽 + 快取路徑標記。
@@ -929,6 +965,10 @@ def run_sql_query(args: dict, file_registry: dict) -> str:
     except Exception as e:  # noqa: BLE001
         return f"❌ Essbase MDX 執行失敗：{e}{_mdx_dim_hint()}"
 
+    # 先抓列維度名（後面 rename/dropna 可能讓 df.attrs 掉光）
+    row_dims = list(df.attrs.get("row", []))
+    cube_id = f"{RUNTIME.esb_app}.{RUNTIME.esb_db}" if RUNTIME.esb_configured else None
+
     # 'value' 欄改名 AMT（前端度量欄慣例）並轉數值；丟掉全 #Missing（None）的交叉格
     if "value" in df.columns:
         df = df.rename(columns={"value": "AMT"})
@@ -937,6 +977,10 @@ def run_sql_query(args: dict, file_registry: dict) -> str:
         df = df.dropna(subset=["AMT"])
     if df.empty:
         return "✅ Essbase 查詢成功執行，但該條件下無資料（或全為 #Missing）。"
+
+    # 列維度→階層欄（Lv1..LvN）：讓前端 AgGrid 顯示成可展開樹狀，
+    # 不再把總計（如 Sector Total）與明細（Assy/Test…）攤平在同一欄。
+    df = _expand_row_hierarchy(df, row_dims, cube_id)
 
     # 數據隔離核心：完整數據落地本地快取，杜絕 Token 爆炸與 AI 幻覺
     os.makedirs(RUNTIME.cache_dir, exist_ok=True)

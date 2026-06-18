@@ -900,8 +900,7 @@ def _mdx_dim_hint() -> str:
     if not dims:
         return ""
     return (f"\n💡 本 cube 可用維度：{', '.join(dims)}。"
-            "維度/成員名請完全照 get_database_schema 的 outline（勿自創如 [Sector]/[Department]）；"
-            "篩年度用 [Time].[2018]，別用 [Year] 屬性維。")
+            "維度/成員名請完全照 get_database_schema 的 outline（勿自創如 [Sector]/[Department]）。")
 
 
 def run_sql_query(args: dict, file_registry: dict) -> str:

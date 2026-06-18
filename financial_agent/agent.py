@@ -832,64 +832,39 @@ def _db_csv_path() -> str:
 
 
 def get_database_schema(args: dict, file_registry: dict) -> str:
-    """回傳 Essbase 多維 cube 的結構說明（維度/成員 + MDX 範例），
-    引導模型產生正確 MDX 並呼叫 run_sql_query。"""
-    print("🗂️ [Cube Schema] 提供 Essbase 多維 cube 結構與 MDX 指引")
-    
-    # 1. 讀取外部 JSON 資料字典
-    catalog_path = "table_catalog.json"
-    table_list_prompt = ""
-    
-    if os.path.exists(catalog_path):
-        with open(catalog_path, "r", encoding="utf-8") as f:
-            catalog = json.load(f)
-            # 動態組裝 Prompt 字串
-            for table_name, meta in catalog.items():
-                table_list_prompt += f"- 目標資料表：`{table_name}`\n"
-                table_list_prompt += f"  - 業務定義：【{meta['alias']}】\n"
-                table_list_prompt += f"  - 適用情境：{meta['description']}\n\n"
-    else:
-        table_list_prompt = "⚠️ 找不到 table_catalog.json 設定檔。"
+    """回傳 Essbase cube 的 MDX 查詢指南（讀 essbase_mdx_guide.md）+ 實際 cube 名。
 
-    # 2. 組裝 Essbase cube 結構與 MDX 指引（Master Prompt）
-    cube = (f"{RUNTIME.esb_app}.{RUNTIME.esb_db}"
-            if RUNTIME.esb_configured else "VSalRPTH.SaleRPTA")
-    return f"""
-        【Essbase 多維 OLAP Cube 結構與查詢指引】
+    指南內容（資料庫說明 / MDX 教學 / cube outline / 可抄範例）可直接編輯該 md，
+    不需改程式；找不到該檔時退回最小說明。"""
+    print("🗂️ [Cube Schema] 提供 Essbase MDX 指南 + cube outline")
+    cube = (f"{RUNTIME.esb_app}.{RUNTIME.esb_db}" if RUNTIME.esb_configured
+            else "（尚未設定，請查 .env 的 FA_ESB_APP / FA_ESB_DB）")
+    header = (f"【目標 cube（App.Db）＝ `{cube}`；MDX 的 FROM 子句請寫 `FROM {cube}`】\n"
+              "（以下為 MDX 查詢指南：資料庫說明 ＋ MDX 教學 ＋ cube outline ＋ 可抄範例）\n\n")
 
-        資料來源已從 Teradata 切換為 **Essbase cube**，請用 **MDX**（不是 SQL）查詢。
-        目標 cube：`{cube}`（FROM 子句寫 `FROM {cube}`）。
+    here = os.path.dirname(os.path.abspath(__file__))
+    for path in (os.path.join(here, "essbase_mdx_guide.md"), "essbase_mdx_guide.md"):
+        if os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    return header + f.read()
+            except OSError as e:  # noqa: BLE001
+                print(f"   ⚠️ 讀取 essbase_mdx_guide.md 失敗：{e}")
+                break
 
-        📐 【10 個維度與主要成員】
-        - Time（時間）：年 2007–2025 → H1/H2 → 季 → 月（如 2018/01）。頂層成員 [Time]。
-        - Measure（科目，僅標籤）：Current、OP，及約 20 個衍生指標（YTD、變異、%、vs Draft/ForecastV2…）。
-        - Currency（幣別）：[Currency].[NTD K]、[Currency].[USD K]。
-        - Sector Total（部門，可加總）：Assy / Test / Material / EMS / Estate / Other（各自還有子項，如 Assy→AsLogic/AsMemory）。
-        - Site Group（18 個群組成員）、Site Org（10 個組織成員）。
-        - Scenario（情境）：Actual、Draft、Draft & Final、ForecastV1–V4。
-        - Filings（僅標籤）：TW_Filing、US_Filing。
-        - Period（屬性 H1/H2）、Year（屬性 2007–2025）：皆關聯 Time。
-
-        🧭 【MDX 撰寫規則】
-        1. 成員一律用中括號 `[維度].[成員]`；階層展開用 `Descendants(成員, 層數, SELF_AND_BEFORE)`、`Children`。
-        2. 骨架：`SELECT {{ 欄集合 }} ON COLUMNS, {{ 列集合 }} ON ROWS FROM {cube} WHERE ( 切片成員 )`。
-        3. 沒放在 ROWS/COLUMNS 的維度，用 `WHERE (...)` 固定成單一成員（slicer）。
-        4. 多維交叉用 `Crossjoin(集合A, 集合B)`。
-
-        💡 【可直接參考的 MDX 範例】
-        - 各部門 × 幣別：
-          SELECT {{ [Currency].[NTD K], [Currency].[USD K] }} ON COLUMNS,
-                 {{ Descendants([Sector Total], 1, SELF_AND_BEFORE) }} ON ROWS FROM {cube}
-        - 部門 × 2018 各月 × 各情境（幣別固定 NTD K）：
-          SELECT {{ Crossjoin(Descendants([Time].[2018], 3, SELF), [Scenario].Children) }} ON COLUMNS,
-                 {{ Descendants([Sector Total], 1, SELF_AND_BEFORE) }} ON ROWS
-          FROM {cube} WHERE ([Currency].[NTD K])
-
-        🚀 【執行與呈現的硬性指示】
-        1. 產生 MDX 後，呼叫 `run_sql_query`，把查詢字串放在 **`mdx`** 參數。
-        2. 底層會把結果落地成 CSV，交給前端 PivotTableJS / AgGrid 樞紐渲染。
-        3. 🚨 不需要 run_python_code 寫 Pandas；只要回覆：「已為您撈取資料，請切換至上方『樞紐分析』頁籤探索。」
-        """
+    # fallback：找不到指南檔時的最小說明（仍足以寫出基本 MDX）
+    return (
+        f"{header}"
+        "⚠️ 找不到 essbase_mdx_guide.md，以下為最小說明。\n\n"
+        f"用 MDX 查 Essbase cube `{cube}`（不是 SQL）。骨架：\n"
+        f"  SELECT {{ 欄集合 }} ON COLUMNS, {{ 列集合 }} ON ROWS FROM {cube} WHERE ( 切片 )\n"
+        "成員寫 [維度].[成員]；展開用 Descendants(成員, 層數, SELF_AND_BEFORE) 或 [成員].Children。\n"
+        "主要維度：Time / Measure / Currency / Sector Total / Site Group / Site Org / "
+        "Scenario / Filings。範例：\n"
+        f"  SELECT {{ [Currency].[NTD K], [Currency].[USD K] }} ON COLUMNS,\n"
+        f"         {{ Descendants([Sector Total], 1, SELF_AND_BEFORE) }} ON ROWS FROM {cube}\n"
+        "產好 MDX → 呼叫 run_sql_query，放進 `mdx` 參數。"
+    )
 
 
 def run_sql_query(args: dict, file_registry: dict) -> str:

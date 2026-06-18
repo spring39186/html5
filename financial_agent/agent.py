@@ -1011,14 +1011,15 @@ def run_sql_query(args: dict, file_registry: dict) -> str:
         # #Missing → 0（不 dropna）：被查到卻沒數字的格子（例如 2018 年 1~4 月）仍要「列出來、補 0」，
         # 否則整個月份會直接從報表/樞紐消失。使用者要看到 1~12 月都在（沒資料的月顯示 0）。
         df[measure_col] = vals.fillna(0)
-    # 丟掉「維度全空白」的列：Essbase grid 偶爾回傳成員名為空的結構列／總計列，不丟的話前端
-    # PivotTableJS 會把空成員顯示成一個叫 'null' 的列/欄桶（此處只丟「維度空」，與上面「值補 0」
-    # 無關——正常月份的維度不空、會保留；只是值可能是補的 0）。
+    # 丟掉「任一維度成員為空」的列：Essbase 偶爾在欄/列軸回傳「空成員」結構欄（屬性維尤甚），
+    # 前端 PivotTableJS 會把它顯示成一個叫 'null' 的列/欄桶。Essbase 真正的成員名永遠非空，
+    # 所以「任一維度空＝結構雜訊」可安全丟掉（此處在階層展開前，維度欄＝原始 grid 維度；
+    # 與上面「值＝#Missing 補 0」無關——正常月份維度不空、會保留，只是值可能是補的 0）。
     dim_cols = [c for c in df.columns if c != measure_col]
     if dim_cols:
         blank = df[dim_cols].apply(
             lambda s: s.isna() | s.astype(str).str.strip().isin(["", "nan", "None", "null", "#Missing"]))
-        df = df[~blank.all(axis=1)]
+        df = df[~blank.any(axis=1)]
     if df.empty:
         return "✅ Essbase 查詢成功執行，但該條件下無資料。"
 

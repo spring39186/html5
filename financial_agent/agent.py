@@ -1005,17 +1005,22 @@ def run_sql_query(args: dict, file_registry: dict) -> str:
     if "value" in df.columns:
         df = df.rename(columns={"value": measure_col})
     if measure_col in df.columns:
-        df[measure_col] = pd.to_numeric(df[measure_col], errors="coerce")
-        df = df.dropna(subset=[measure_col])
-    # 丟掉「維度全空白」的列：Essbase grid 偶爾回傳成員名為空的結構列／總計列（值常為 0，
-    # 躲過上面的 dropna），不丟的話前端 PivotTableJS 會把空成員顯示成一個叫 'null' 的列/欄桶。
+        vals = pd.to_numeric(df[measure_col], errors="coerce")
+        if int(vals.notna().sum()) == 0:        # 整個 grid 全 #Missing → 才當作真的無資料
+            return "✅ Essbase 查詢成功執行，但該條件下無資料（全為 #Missing）。"
+        # #Missing → 0（不 dropna）：被查到卻沒數字的格子（例如 2018 年 1~4 月）仍要「列出來、補 0」，
+        # 否則整個月份會直接從報表/樞紐消失。使用者要看到 1~12 月都在（沒資料的月顯示 0）。
+        df[measure_col] = vals.fillna(0)
+    # 丟掉「維度全空白」的列：Essbase grid 偶爾回傳成員名為空的結構列／總計列，不丟的話前端
+    # PivotTableJS 會把空成員顯示成一個叫 'null' 的列/欄桶（此處只丟「維度空」，與上面「值補 0」
+    # 無關——正常月份的維度不空、會保留；只是值可能是補的 0）。
     dim_cols = [c for c in df.columns if c != measure_col]
     if dim_cols:
         blank = df[dim_cols].apply(
             lambda s: s.isna() | s.astype(str).str.strip().isin(["", "nan", "None", "null", "#Missing"]))
         df = df[~blank.all(axis=1)]
     if df.empty:
-        return "✅ Essbase 查詢成功執行，但該條件下無資料（或全為 #Missing）。"
+        return "✅ Essbase 查詢成功執行，但該條件下無資料。"
 
     # 列維度→階層欄（『<維度名> L1..Ln』）：讓前端 AgGrid 顯示成可展開樹狀、欄名帶維度名，
     # 不再把總計（如 Sector Total）與明細（Assy/Test…）攤平在同一欄。

@@ -182,6 +182,19 @@ def _measure_col(df: pd.DataFrame):
     return df.columns[-1] if len(df.columns) else None
 
 
+def _level_cols(df: pd.DataFrame):
+    """偵測「列維度階層欄」並依層級排序。後端依 outline 展開的欄名＝『<維度名> L<n>』
+    （如 `Sector Total L1`／`L2`／`L3`，讓使用者一眼看出階層依據哪個維度）；也相容舊的
+    `Lv<n>`。Teradata 的 `ORG_L<n>` 不在此（另行處理）。回傳已依層級排序的欄名 list。"""
+    found = []
+    for c in df.columns:
+        s = str(c)
+        m = re.fullmatch(r"(?:.+ )?L(\d+)", s) or re.fullmatch(r"Lv(\d+)", s)
+        if m and not s.startswith("ORG_"):
+            found.append((c, int(m.group(1))))
+    return [c for c, _ in sorted(found, key=lambda t: t[1])]
+
+
 def _measure_additivity(df: pd.DataFrame, mcol):
     """回傳 (agg, non_additive)：agg ∈ {'sum','avg'}，non_additive=不可加總的度量名清單。
 
@@ -235,11 +248,17 @@ def _pivot_html(csv_path: str, mtime: float) -> str:
     os.makedirs("temp_dir", exist_ok=True)
     # 注意：pivottablejs.pivot_ui 的輸出參數叫 outfile_path（不是 outfile）。
     # 傳錯名會被 **kwargs 吃掉、實際寫到預設的 pivottablejs.html，導致下方 open(tmp) 找不到檔。
-    # 預設就以「Sum/Average of <度量欄>」開場，使用者再自行拖維度；否則 PivotTableJS 預設
-    # 是 Count，會讓人以為數值不能加總。% 等非加總度量改用 Average（不亂加成垃圾）。
+    # 預設就「列＝階層維度、欄＝其餘維度（如 Period）、值＝Sum/Average of 度量欄」直接開成
+    # 一張有意義的樞紐——否則 PivotTableJS 沒指定列/欄時會用空白(顯示成 'null')當列欄標頭、
+    # 且預設是 Count，讓人誤以為出現了不存在的 null 欄、數值也不能加總。
+    # % 等非加總度量改用 Average（不亂加成垃圾）。
     agg, _ = _measure_additivity(df, mcol)
     agg_name = "Average" if agg == "avg" else "Sum"
-    pivot_kwargs = ({"aggregatorName": agg_name, "vals": [mcol]}
+    levels = _level_cols(df)
+    others = [c for c in df.columns if c != mcol and c not in set(levels)]   # 欄維度（Period…）
+    rows = levels or others[:1]
+    cols = others if levels else others[1:]
+    pivot_kwargs = ({"aggregatorName": agg_name, "vals": [mcol], "rows": rows, "cols": cols}
                     if mcol is not None and pd.api.types.is_numeric_dtype(df[mcol]) else {})
     pivot_ui(df, outfile_path=tmp, **pivot_kwargs)
     try:
@@ -283,10 +302,9 @@ def _render_essbase_aggrid(df: pd.DataFrame):
     gob.configure_default_column(groupable=True, value=True, enableRowGroup=True,
                                  filter=True, sortable=True)
     # ⚡ 樹狀群組：優先用後端依 outline 展開好的階層欄逐層下鑽——
-    #   Essbase 列維度 → Lv1..LvN（如 Sector Total → Assy/Test…）；
+    #   Essbase 列維度 → 『<維度名> L1..Ln』（如 Sector Total L1/L2/L3）；
     #   舊 Teradata 寬表 → ORG_L1..Ln；都沒有才退回原始 PARENT/CHILD 整串路徑。
-    lv_levels = sorted((c for c in df.columns if re.fullmatch(r"Lv\d+", c)),
-                       key=lambda c: int(c[2:]))
+    lv_levels = _level_cols(df)
     org_levels = sorted((c for c in df.columns if re.fullmatch(r"ORG_L\d+", c)),
                         key=lambda c: int(c[5:]))
     group_cols = lv_levels or org_levels
@@ -303,11 +321,10 @@ def _render_essbase_aggrid(df: pd.DataFrame):
             autoGroupColumnDef={"headerName": "階層", "minWidth": 240,
                                 "cellRendererParams": {"suppressCount": False}})
         if lv_levels:
-            # 其餘欄維度（非 Lv／非值欄，如 Currency）→ 樞紐欄：多幣別 NTD K|USD K 各自成欄、
+            # 其餘欄維度（非階層欄／非值欄，如 Currency）→ 樞紐欄：多幣別 NTD K|USD K 各自成欄、
             # 父層各幣別分開聚合（不再混幣）。單一幣別就只出現一個欄群組。
-            value_set = set(value_cols)
-            pivot_cols = [c for c in df.columns
-                          if c not in value_set and not re.fullmatch(r"Lv\d+", c)]
+            skip = set(value_cols) | set(lv_levels)
+            pivot_cols = [c for c in df.columns if c not in skip]
             for c in pivot_cols:
                 gob.configure_column(c, pivot=True)
             if pivot_cols:

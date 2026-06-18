@@ -926,8 +926,9 @@ def _measures_in_mdx(mdx, cube_id):
 
 
 def _expand_row_hierarchy(df, row_dims, cube_id):
-    """單一列維度時，依 outline 把列成員展開成 Lv1..LvN 階層欄（取代原維度欄），並丟掉
-    內部（父）節點列以免群組重複加總——前端 AgGrid 就能樹狀展開、總計當父層、明細縮排。
+    """單一列維度時，依 outline 把列成員展開成『<維度名> L1..Ln』階層欄（取代原維度欄），
+    欄名帶維度名，使用者一眼就知道階層依據哪個維度（如 Sector Total L1/L2/L3）。並丟掉內部
+    （父）節點列以免群組重複加總——前端 AgGrid 就能樹狀展開、總計當父層、明細縮排。
     缺 outline / 多列維 / 無真正階層時原樣返回（保持平面），對任意查詢都安全。"""
     if len(row_dims) != 1:
         return df
@@ -956,9 +957,9 @@ def _expand_row_hierarchy(df, row_dims, cube_id):
     if maxd <= 1:
         return df                                      # 無真正階層 → 維持平面
     for i in range(maxd):
-        df.insert(i, f"Lv{i + 1}",
+        df.insert(i, f"{rdim} L{i + 1}",              # 欄名帶維度名（如 'Sector Total L1'）
                   paths.map(lambda p, _i=i: p[_i] if _i < len(p) else ""))
-    return df.drop(columns=[rdim])                     # 用 Lv 欄取代同名易混淆的維度欄
+    return df.drop(columns=[rdim])                     # 用階層欄取代同名易混淆的維度欄
 
 
 def run_sql_query(args: dict, file_registry: dict) -> str:
@@ -1009,7 +1010,7 @@ def run_sql_query(args: dict, file_registry: dict) -> str:
     if df.empty:
         return "✅ Essbase 查詢成功執行，但該條件下無資料（或全為 #Missing）。"
 
-    # 列維度→階層欄（Lv1..LvN）：讓前端 AgGrid 顯示成可展開樹狀，
+    # 列維度→階層欄（『<維度名> L1..Ln』）：讓前端 AgGrid 顯示成可展開樹狀、欄名帶維度名，
     # 不再把總計（如 Sector Total）與明細（Assy/Test…）攤平在同一欄。
     df = _expand_row_hierarchy(df, row_dims, cube_id)
 

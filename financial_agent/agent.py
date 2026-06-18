@@ -962,6 +962,24 @@ def _expand_row_hierarchy(df, row_dims, cube_id):
     return df.drop(columns=[rdim])                     # 用階層欄取代同名易混淆的維度欄
 
 
+def _normalize_mdx(mdx: str) -> str:
+    """把『一定錯』的 MDX 寫法就地修正，提升模型產 MDX 的可靠度（有修就印紀錄）。
+
+    目前處理一個明確案例：`[Time].[<成員>].Members`——在本 cube 它會回傳 **Period 屬性維**
+    的所有層級（`01`–`12`＋`H1`/`H2`＋`Q1`–`Q4`＋根＋一個空成員），**不是**該年 12 個月；
+    改成 `Descendants([Time].[<成員>], LEAVES)`（乾淨月葉 `2018/01…12`）。
+    `成員.Members` 本就非標準 MDX（`.Members` 應接維度/層級），故此改寫不會誤傷正常查詢。"""
+    import re
+    if not mdx:
+        return mdx
+    new = re.sub(r"\[Time\]\s*\.\s*\[([^\]]+)\]\s*\.\s*Members",
+                 lambda m: f"Descendants([Time].[{m.group(1)}], LEAVES)", mdx,
+                 flags=re.IGNORECASE)
+    if new != mdx:
+        print("   🔧 MDX 自動修正：[Time].[…].Members → Descendants([Time].[…], LEAVES)（取乾淨 12 月葉）")
+    return new
+
+
 def run_sql_query(args: dict, file_registry: dict) -> str:
     """執行模型生成的 MDX 於 Essbase cube：essbase_client（已驗證連線 + essbase_grid 正確解析）
     攤成長表，完整落地為 utf-8-sig CSV（數據隔離），只回前 30 筆 Markdown 預覽 + 快取路徑標記。
@@ -971,6 +989,7 @@ def run_sql_query(args: dict, file_registry: dict) -> str:
     mdx = (args.get("mdx") or args.get("sql") or "").strip()
     if not mdx:
         return "❌ 未提供 MDX 查詢（請把 MDX 字串放在 `mdx` 參數）。"
+    mdx = _normalize_mdx(mdx)   # 就地修正『一定錯』的寫法（如 [Time].[年].Members）
 
     print(f"📊 [Essbase MDX] {mdx[:300]}{'…' if len(mdx) > 300 else ''}")
 

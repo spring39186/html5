@@ -864,7 +864,7 @@ def get_database_schema(args: dict, file_registry: dict) -> str:
 
     # 2) outline（動態，隨 cube 改變）— 依「目前 cube」抓對應的 outline 檔即時產生
     #    （每顆 cube 一份 essbase_outline_parent_child.<App.Db>.csv；無專屬檔則退回通用檔）
-    cube_id = f"{RUNTIME.esb_app}.{RUNTIME.esb_db}" if RUNTIME.esb_configured else None
+    cube_id = _cube_id()
     try:
         import essbase_grid as eg
         outline = eg.outline_summary(cube=cube_id)
@@ -893,7 +893,7 @@ def _mdx_dim_hint() -> str:
     """MDX 失敗時附的修正提示：列出本 cube 可用維度（讀對應 outline 檔），減少模型亂猜維度名。"""
     try:
         import essbase_grid as eg
-        cube_id = f"{RUNTIME.esb_app}.{RUNTIME.esb_db}" if RUNTIME.esb_configured else None
+        cube_id = _cube_id()
         dims = eg.outline_dimensions(cube=cube_id)
     except Exception:  # noqa: BLE001
         dims = []
@@ -903,6 +903,21 @@ def _mdx_dim_hint() -> str:
             "維度/成員名請完全照 get_database_schema 的 outline（勿自創如 [Sector]/[Department]）。")
 
 
+def _cube_id():
+    """目前 cube 的 App.Db 識別字（未設定回 None）。集中一處，免得到處重打同一串。"""
+    return f"{RUNTIME.esb_app}.{RUNTIME.esb_db}" if RUNTIME.esb_configured else None
+
+
+def _measure_members(cube_id):
+    """依 outline 取 Measure 維的成員集合（含根 'Measure'）。找不到／讀檔失敗回空集合。"""
+    try:
+        import essbase_grid as eg
+        pm = eg.load_parent_map(dimension="Measure", cube=cube_id)
+    except Exception:  # noqa: BLE001
+        return set()
+    return {m for m in (set(pm) | set(pm.values())) if m}
+
+
 def _measures_in_mdx(mdx, cube_id):
     """掃 MDX 文字，回傳其中出現的 Measure 維成員（依 outline）。用在 Measure 放 WHERE 時，
     取出「單一固定度量」的真實名稱來當數值欄名，讓前端據此判斷可否加總。比對到的短名若是
@@ -910,12 +925,7 @@ def _measures_in_mdx(mdx, cube_id):
     由呼叫端決定（只有剛好一個時才採用）。找不到 outline／無命中回 []。"""
     if not mdx:
         return []
-    try:
-        import essbase_grid as eg
-        pmap = eg.load_parent_map(dimension="Measure", cube=cube_id)
-    except Exception:  # noqa: BLE001
-        return []
-    members = {m for m in (set(pmap) | set(pmap.values())) if m and m != "Measure"}
+    members = {m for m in _measure_members(cube_id) if m != "Measure"}
     # 優先抓帶括號的精確寫法 [成員]：避免 'Current' 誤中 [Time].CurrentMember 之類；
     # 也讓 [Current] 與 [Current %] 各自獨立、不互相吃字。括號版抓不到才退回裸名子字串。
     hit = [m for m in members if f"[{m}]" in mdx]
@@ -949,11 +959,13 @@ def _expand_row_hierarchy(df, row_dims, cube_id):
     internal = {pmap.get(m, "") for m in present} & present
     leaves = present - internal
     if leaves and internal:
-        df = df[members.isin(leaves)].copy()
-        members = df[rdim].astype(str)
+        mask = members.isin(leaves)
+        df = df[mask].copy()
+        members = members[mask]                         # 重用已轉字串的 Series（index 仍對齊 df）
 
-    paths = members.map(lambda m: eg.member_path(m, pmap))
-    maxd = int(paths.map(len).max()) if len(paths) else 0
+    path_by_member = {m: eg.member_path(m, pmap) for m in members.unique()}  # 每個成員只走一次鏈
+    paths = members.map(path_by_member)
+    maxd = max((len(p) for p in path_by_member.values()), default=0)
     if maxd <= 1:
         return df                                      # 無真正階層 → 維持平面
     for i in range(maxd):
@@ -971,15 +983,14 @@ def _normalize_mdx(mdx: str) -> str:
       · `[Time].[<年>].Members` → `Descendants([Time].[<年>], 3, SELF)`（前者會跑出 Period 屬性全層級）
       · `Descendants([Time].[<年>], LEAVES)` → `…, 3, SELF`（**本 cube 不支援 LEAVES**）
       · Measure 成員不在 outline（如亂寫 `Sales Amount`/`Sales`）→ 退成 `[Measure].[Current]`（本期值）"""
-    import re
     if not mdx:
         return mdx
     fixes = []
 
     def _apply(pattern, repl, label):
         nonlocal mdx
-        new, n = re.subn(pattern, repl, mdx, flags=re.IGNORECASE)
-        if n:
+        new = re.subn(pattern, repl, mdx, flags=re.IGNORECASE)[0]
+        if new != mdx:                                  # 用「真的有變」判斷，校驗型 repl 不會誤報
             mdx = new
             fixes.append(label)
 
@@ -991,23 +1002,12 @@ def _normalize_mdx(mdx: str) -> str:
     _apply(r"(Descendants\(\s*\[Time\]\s*\.\s*\[\d{4}\]\s*,\s*)LEAVES(\s*\))",
            r"\g<1>3, SELF\g<2>", "Time LEAVES→3,SELF")
 
-    # Measure 成員校驗：不在 outline 的（Sales Amount/Sales…）→ 預設本期值 [Measure].[Current]
-    try:
-        import essbase_grid as eg
-        cube_id = (f"{RUNTIME.esb_app}.{RUNTIME.esb_db}"
-                   if getattr(RUNTIME, "esb_configured", False) else None)
-        pm = eg.load_parent_map(dimension="Measure", cube=cube_id)
-        valid = {m for m in (set(pm) | set(pm.values())) if m}
-        if valid:
-            new, n = re.subn(
-                r"\[Measure\]\s*\.\s*\[([^\]]+)\]",
-                lambda mt: mt.group(0) if mt.group(1).strip() in valid else "[Measure].[Current]",
-                mdx)
-            if new != mdx:
-                mdx = new
-                fixes.append("無效 Measure→[Current]")
-    except Exception:  # noqa: BLE001
-        pass
+    # Measure 成員不在 outline（Sales Amount/Sales…）→ 退成本期值 [Measure].[Current]
+    valid = _measure_members(_cube_id())
+    if valid:
+        _apply(r"\[Measure\]\s*\.\s*\[([^\]]+)\]",
+               lambda mt: mt.group(0) if mt.group(1).strip() in valid else "[Measure].[Current]",
+               "無效 Measure→[Current]")
 
     if fixes:
         print(f"   🔧 MDX 自動修正：{'；'.join(fixes)}")
@@ -1043,7 +1043,7 @@ def run_sql_query(args: dict, file_registry: dict) -> str:
 
     # 先抓列維度名（後面 rename/dropna 可能讓 df.attrs 掉光）
     row_dims = list(df.attrs.get("row", []))
-    cube_id = f"{RUNTIME.esb_app}.{RUNTIME.esb_db}" if RUNTIME.esb_configured else None
+    cube_id = _cube_id()
 
     # 數值欄命名（Essbase 解析器原本叫它 'value'）：
     #   · Measure 維在 WHERE（未上軸）且只有單一度量 → 直接用「真實度量名」當欄名，

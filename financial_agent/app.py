@@ -18,6 +18,13 @@ from agent import run_financial_agent
 from config import MODEL_CONFIG
 import export_utils
 
+# 度量可否加總（%／_D 不可加總，見 essbase_grid）；缺模組時保守當作全可加總。
+try:
+    from essbase_grid import measure_is_additive
+except Exception:  # noqa: BLE001
+    def measure_is_additive(_name):  # type: ignore
+        return True
+
 # 🚀 高階互動數據組件（樹狀網格 + 自由樞紐）；沒裝就安全降級成一般表格
 try:
     from st_aggrid import AgGrid, GridOptionsBuilder, ColumnsAutoSizeMode
@@ -201,10 +208,6 @@ def _measure_additivity(df: pd.DataFrame, mcol):
     度量身分來源——`Measure` 欄（度量在軸上）優先，否則用數值欄名（度量在 WHERE 時後端
     已把欄名設成真實度量名）。任一度量是 %／比率（見 essbase_grid.measure_is_additive）就
     改用 Average，避免把百分比亂加成垃圾。判斷不出（缺 essbase_grid）時保守回 sum。"""
-    try:
-        from essbase_grid import measure_is_additive
-    except Exception:  # noqa: BLE001
-        return "sum", []
     if "Measure" in df.columns:
         measures = [str(m) for m in df["Measure"].unique()]
     elif mcol is not None:
@@ -278,12 +281,6 @@ def _render_essbase_aggrid(df: pd.DataFrame):
         st.dataframe(df, use_container_width=True)
         st.caption("💡 安裝 `streamlit-aggrid` 可解鎖多層級群組展開功能。")
         return
-
-    try:
-        from essbase_grid import measure_is_additive
-    except Exception:  # noqa: BLE001
-        def measure_is_additive(_n):
-            return True
 
     mcol = _measure_col(df)   # 度量欄用偵測，不再寫死 AMT
     agg, non_add = _measure_additivity(df, mcol)   # 在 long（含 Measure 欄）上判斷

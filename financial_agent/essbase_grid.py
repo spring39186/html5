@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import csv as _csv
+import functools as _functools
 import glob as _glob
 import os
 from typing import Any
@@ -30,6 +31,7 @@ _CSV_NAME = "essbase_outline_parent_child.csv"
 DEFAULT_PARENT_CHILD_CSV = os.path.normpath(os.path.join(_HERE, "..", _CSV_NAME))
 
 
+@_functools.lru_cache(maxsize=32)
 def parent_child_csv_path(csv_path: str | None = None,
                           cube: str | None = None) -> str | None:
     """定位 parent/child 建檔（**每顆 cube 一份，檔名帶 cube**）。
@@ -131,15 +133,23 @@ def load_parent_map(csv_path: str | None = None,
     parent: dict[str, str] = {}
     if not path:
         return parent
-    with open(path, encoding="utf-8") as f:
-        for r in _csv.DictReader(f):
-            if dimension and (r.get("Dimension") or "").strip() != dimension:
-                continue
-            child = (r.get("Child") or "").strip()
-            par = (r.get("Parent") or "").strip()
-            if child and child not in parent:      # 先到先得，避免同名覆寫
-                parent[child] = par
+    for dim, child, par in _read_parent_child_rows(path):
+        if dimension and dim != dimension:
+            continue
+        if child and child not in parent:          # 先到先得，避免同名覆寫
+            parent[child] = par
     return parent
+
+
+@_functools.lru_cache(maxsize=16)
+def _read_parent_child_rows(path: str) -> tuple[tuple[str, str, str], ...]:
+    """讀 parent_child CSV → ((Dimension, Child, Parent), …)，以 path 快取避免每次查詢重讀檔。
+    （outline 在單次行程內視為固定；換 cube／重抽後重啟即可。）"""
+    with open(path, encoding="utf-8") as f:
+        return tuple(((r.get("Dimension") or "").strip(),
+                      (r.get("Child") or "").strip(),
+                      (r.get("Parent") or "").strip())
+                     for r in _csv.DictReader(f))
 
 
 def member_path(member: str, parent_map: dict[str, str]) -> list[str]:

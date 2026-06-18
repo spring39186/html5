@@ -29,15 +29,21 @@ _CSV_NAME = "essbase_outline_parent_child.csv"
 DEFAULT_PARENT_CHILD_CSV = os.path.normpath(os.path.join(_HERE, "..", _CSV_NAME))
 
 
-def parent_child_csv_path(csv_path: str | None = None) -> str | None:
-    """定位 parent/child 建檔：給定路徑優先，否則搜常見位置；找不到回 None。"""
+def parent_child_csv_path(csv_path: str | None = None,
+                          cube: str | None = None) -> str | None:
+    """定位 parent/child 建檔（**每顆 cube 各維護一份**）。
+
+    順序：明確 `csv_path` ＞ 該 cube 專屬檔 `essbase_outline_parent_child.<App.Db>.csv`
+    ＞ 通用 `essbase_outline_parent_child.csv`（目前 = VSalRPTH.SaleRPTA）。找不到回 None。
+    """
+    dirs = (_HERE, os.path.join(_HERE, ".."),          # financial_agent/、repo 根
+            os.getcwd(), os.path.join(os.getcwd(), ".."))
+    names: list[str] = []
+    if cube and cube.strip():
+        names.append(f"essbase_outline_parent_child.{cube.strip()}.csv")  # cube 專屬優先
+    names.append(_CSV_NAME)                                                # 通用 fallback
     cands = [csv_path] if csv_path else []
-    cands += [
-        os.path.join(_HERE, "..", _CSV_NAME),        # repo 根（預設位置）
-        os.path.join(_HERE, _CSV_NAME),              # 與本模組同層（financial_agent/）
-        os.path.join(os.getcwd(), _CSV_NAME),        # 目前工作目錄
-        os.path.join(os.getcwd(), "..", _CSV_NAME),  # 工作目錄上一層
-    ]
+    cands += [os.path.join(d, n) for n in names for d in dirs]
     for p in cands:
         if p and os.path.exists(p):
             return os.path.normpath(p)
@@ -105,13 +111,14 @@ def parse_mdx_grid(payload: dict) -> tuple[list[dict], dict]:
 
 # ── 階層（parent/child）工具 ────────────────────────────────────────────────
 def load_parent_map(csv_path: str | None = None,
-                    dimension: str | None = None) -> dict[str, str]:
+                    dimension: str | None = None,
+                    cube: str | None = None) -> dict[str, str]:
     """讀 parent_child 建檔 → {child: parent}（parent 為 '' 代表該維頂層）。
 
     dimension 有給就只取該維度（避免不同維度同名成員互相汙染）。
     檔案不存在則回空 dict（呼叫端自行降級成平面）。
     """
-    path = parent_child_csv_path(csv_path)
+    path = parent_child_csv_path(csv_path, cube=cube)
     parent: dict[str, str] = {}
     if not path:
         return parent
@@ -139,6 +146,47 @@ def member_path(member: str, parent_map: dict[str, str]) -> list[str]:
         seen.add(p)
         cur = p
     return list(reversed(chain))
+
+
+def outline_summary(csv_path: str | None = None, max_children: int = 12,
+                    cube: str | None = None) -> str:
+    """從 parent/child 建檔產生「維度 → 頂層成員 + 直接子成員 + 成員數」的精簡 markdown 摘要。
+
+    給 agent 的 get_database_schema 動態帶入：**outline 每顆 cube 不同**，所以即時讀檔、
+    不寫死在指南裡。換 cube 時重抽 essbase_outline_parent_child.csv 即可自動跟著變。
+    找不到檔回空字串。
+    """
+    import collections
+
+    path = parent_child_csv_path(csv_path, cube=cube)
+    if not path:
+        return ""
+    dims: "collections.OrderedDict[str, dict]" = collections.OrderedDict()
+    with open(path, encoding="utf-8") as f:
+        for r in _csv.DictReader(f):
+            dim = (r.get("Dimension") or "").strip()
+            child = (r.get("Child") or "").strip()
+            parent = (r.get("Parent") or "").strip()
+            if not dim or not child:
+                continue
+            d = dims.setdefault(dim, {"members": set(),
+                                      "kids": collections.defaultdict(list),
+                                      "roots": []})
+            d["members"].add(child)
+            if parent:
+                d["kids"][parent].append(child)
+            else:
+                d["roots"].append(child)
+
+    lines = []
+    for dim, d in dims.items():
+        top = d["roots"][0] if d["roots"] else dim
+        children = d["kids"].get(top, [])
+        shown = ", ".join(children[:max_children])
+        more = f" …(+{len(children) - max_children})" if len(children) > max_children else ""
+        kids = f"：{shown}{more}" if shown else ""
+        lines.append(f"- **{dim}**（{len(d['members'])} 個成員，頂層 `[{top}]`）{kids}")
+    return "\n".join(lines)
 
 
 def aggregate_values(values_by_member: dict[str, float | None],

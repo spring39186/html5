@@ -23,18 +23,15 @@
 
 ---
 
-## 1. 資料庫說明（請自行填寫）
+## 1. 資料庫說明
 
-<!--
-　留白給你補：這顆 cube 的業務意義、單位、涵蓋範圍、注意事項。
-　模型會讀這一段來決定「該不該查、查什麼、用什麼單位解讀」。
--->
+<!-- 這顆 cube 的業務意義、單位、涵蓋範圍、注意事項；模型會據此決定該不該查、怎麼解讀。 -->
 
-- **目標 cube（App.Db）**：（待填，例如 `VSalRPTH.SaleRPTA`）
-- **這顆 cube 是什麼 / 業務範圍**：（待填）
-- **金額單位 / 幣別**：（待填，例如 `NTD K` = 新台幣仟元、`USD K` = 美元仟元）
-- **資料涵蓋範圍**：（待填，例如年度 2007–2025；哪些情境/月份才有實際值）
-- **重要提醒 / 限制**：（待填，例如某些 Scenario 只有特定期間、權限範圍、口徑定義…）
+- **目標 cube（App.Db）**：`VSalRPTH.SaleRPTA`
+- **這顆 cube 是什麼 / 業務範圍**：Sales 報告（銷售）
+- **金額單位 / 幣別**：`NTD K` = 新台幣仟元、`USD K` = 美元仟元
+- **資料涵蓋範圍**：2012–2018
+- **重要提醒 / 限制**：目前**只有 2018 年**的資料可查；查詢請鎖定 2018（如 `WHERE ([Year].[2018])` 或用 `[Time].[2018]`）。
 
 ---
 
@@ -121,28 +118,20 @@ FROM App.Db
 
 ---
 
-## 3. Cube Outline（可查的維度與成員）
+## 3. Cube Outline（維度與成員）
 
-> 完整 outline 見同層的 `essbase_outline.md`（縮排階層 + 成員公式）與
-> `essbase_outline_parent_child.csv`（父子關係）。下面是夠用來寫 MDX 的摘要。
-
-本 cube 共 **10 個維度**：
-
-| 維度 | 說明 / 主要成員 |
-|---|---|
-| **Time** | 年 2007–2025 → H1/H2 → 季 → 月（如 `2018/01`）。頂層成員 `[Time]`。|
-| **Measure** | `Current`、`OP`，及約 20 個衍生指標（YTD、變異、%、vs Draft/ForecastV2…）。僅標籤維。|
-| **Currency** | `[Currency].[NTD K]`、`[Currency].[USD K]`。|
-| **Sector Total** | 可加總。子成員：`Assy` / `Test` / `Material` / `EMS` / `Estate` / `Other`（各自還有更細，如 `Assy → AsLogic, AsMemory`）。|
-| **Site Group** | 18 個群組成員。|
-| **Site Org** | 10 個組織成員。|
-| **Scenario** | `Actual`、`Draft`、`Draft & Final`、`ForecastV1`~`ForecastV4`。|
-| **Filings** | `TW_Filing`、`US_Filing`。僅標籤維。|
-| **Period（屬性）** | `H1`(Q1,Q2) / `H2`，關聯 Time。|
-| **Year（屬性）** | 2007–2025，關聯 Time。|
-
-> ⚠ outline 是從 Essbase 編輯器擷取，部分分支當時為「收合」狀態（檔內標 `collapsed:N`），
-> 深層葉成員可能未完整列出。**不確定某成員是否存在時，用 `Descendants`/`Children` 動態展開，不要硬猜成員名。**
+> **本 cube 的實際維度/成員清單，由系統在文末「本 cube 實際維度與成員」自動帶入**——
+> 因為**每顆 cube 的 outline 不同**，這裡不寫死，而是依「目前設定的 cube（App.Db）」抓對應的 outline 檔。
+>
+> **每顆 cube 各維護一份 outline 檔**（檔名帶 cube）：
+> - `essbase_outline_parent_child.<App.Db>.csv` — 程式讀這份產生上面的摘要。
+> - `essbase_outline.<App.Db>.md` — 人看的完整縮排階層 + 成員公式。
+> - 找不到 cube 專屬檔時，退回通用 `essbase_outline_parent_child.csv` / `essbase_outline.md`
+>   （**目前這兩個通用檔即 `VSalRPTH.SaleRPTA` 的 outline**）。
+>
+> ⚠ outline 檔是「對某一顆 cube」抽取的快照；**換 cube 一定要抽該 cube 的 outline 檔**
+> （抽法記在 `CLAUDE.md`）。部分分支抽取時為「收合」狀態（標 `collapsed:N`），深層葉成員可能未完整列出。
+> **不確定某成員是否存在時，用 `Descendants`/`Children` 動態展開，不要硬猜成員名。**
 
 ---
 

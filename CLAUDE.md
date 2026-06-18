@@ -11,6 +11,13 @@ Future financial-data queries should target the **Essbase multidimensional cube*
   [`essbase_outline_parent_child.csv`](essbase_outline_parent_child.csv)
   (loadable parent/child build file). Treat these as the source of truth for the
   Essbase outline. Re-extract/refresh them if the cube changes.
+  - **Per-cube outline files**: each cube has its own outline. The loader
+    (`essbase_grid.parent_child_csv_path(cube=...)`, used by `outline_summary`/
+    `load_parent_map`, and by the agent's `get_database_schema`) resolves
+    `essbase_outline_parent_child.<App.Db>.csv` first, then falls back to the bare
+    `essbase_outline_parent_child.csv`. The current bare files **are the
+    `VSalRPTH.SaleRPTA` outline**. For a new cube, drop
+    `essbase_outline_parent_child.<App.Db>.csv` (and `essbase_outline.<App.Db>.md`).
 - **Cube = 10 dimensions:**
   - `Time` (Time) — years 2007–2025, each year → H1/H2 → quarters …
   - `Measure` (Accounts, Label only) — 23 members; `Current`, `OP` + ~20 derived

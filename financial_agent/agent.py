@@ -832,39 +832,58 @@ def _db_csv_path() -> str:
 
 
 def get_database_schema(args: dict, file_registry: dict) -> str:
-    """回傳 Essbase cube 的 MDX 查詢指南（讀 essbase_mdx_guide.md）+ 實際 cube 名。
+    """回傳 Essbase cube 的 MDX 查詢指南（讀 essbase_mdx_guide.md）+ 實際 cube 名
+    + 「動態」outline（每顆 cube 不同，即時讀 essbase_outline_parent_child.csv 帶入）。
 
-    指南內容（資料庫說明 / MDX 教學 / cube outline / 可抄範例）可直接編輯該 md，
-    不需改程式；找不到該檔時退回最小說明。"""
-    print("🗂️ [Cube Schema] 提供 Essbase MDX 指南 + cube outline")
+    指南內容（資料庫說明 / MDX 教學 / 可抄範例）可直接編輯該 md，不需改程式；
+    outline 則跟著 cube 走（換 cube 重抽 parent_child.csv 即自動更新）。"""
+    print("🗂️ [Cube Schema] 提供 Essbase MDX 指南 + 動態 cube outline")
     cube = (f"{RUNTIME.esb_app}.{RUNTIME.esb_db}" if RUNTIME.esb_configured
             else "（尚未設定，請查 .env 的 FA_ESB_APP / FA_ESB_DB）")
     header = (f"【目標 cube（App.Db）＝ `{cube}`；MDX 的 FROM 子句請寫 `FROM {cube}`】\n"
-              "（以下為 MDX 查詢指南：資料庫說明 ＋ MDX 教學 ＋ cube outline ＋ 可抄範例）\n\n")
+              "（以下為 MDX 查詢指南：資料庫說明 ＋ MDX 教學 ＋ 可抄範例；文末附本 cube 實際 outline）\n\n")
 
+    # 1) 指南本體（靜態，可編輯 md）
     here = os.path.dirname(os.path.abspath(__file__))
+    guide_text = ""
     for path in (os.path.join(here, "essbase_mdx_guide.md"), "essbase_mdx_guide.md"):
         if os.path.exists(path):
             try:
                 with open(path, encoding="utf-8") as f:
-                    return header + f.read()
+                    guide_text = f.read()
             except OSError as e:  # noqa: BLE001
                 print(f"   ⚠️ 讀取 essbase_mdx_guide.md 失敗：{e}")
-                break
+            break
+    if not guide_text:
+        guide_text = (
+            "⚠️ 找不到 essbase_mdx_guide.md，以下為最小說明。\n\n"
+            f"用 MDX 查 Essbase cube `{cube}`（不是 SQL）。骨架：\n"
+            f"  SELECT {{ 欄集合 }} ON COLUMNS, {{ 列集合 }} ON ROWS FROM {cube} WHERE ( 切片 )\n"
+            "成員寫 [維度].[成員]；展開用 Descendants(成員, 層數, SELF_AND_BEFORE) 或 [成員].Children。\n"
+            "產好 MDX → 呼叫 run_sql_query，放進 `mdx` 參數。")
 
-    # fallback：找不到指南檔時的最小說明（仍足以寫出基本 MDX）
-    return (
-        f"{header}"
-        "⚠️ 找不到 essbase_mdx_guide.md，以下為最小說明。\n\n"
-        f"用 MDX 查 Essbase cube `{cube}`（不是 SQL）。骨架：\n"
-        f"  SELECT {{ 欄集合 }} ON COLUMNS, {{ 列集合 }} ON ROWS FROM {cube} WHERE ( 切片 )\n"
-        "成員寫 [維度].[成員]；展開用 Descendants(成員, 層數, SELF_AND_BEFORE) 或 [成員].Children。\n"
-        "主要維度：Time / Measure / Currency / Sector Total / Site Group / Site Org / "
-        "Scenario / Filings。範例：\n"
-        f"  SELECT {{ [Currency].[NTD K], [Currency].[USD K] }} ON COLUMNS,\n"
-        f"         {{ Descendants([Sector Total], 1, SELF_AND_BEFORE) }} ON ROWS FROM {cube}\n"
-        "產好 MDX → 呼叫 run_sql_query，放進 `mdx` 參數。"
-    )
+    # 2) outline（動態，隨 cube 改變）— 依「目前 cube」抓對應的 outline 檔即時產生
+    #    （每顆 cube 一份 essbase_outline_parent_child.<App.Db>.csv；無專屬檔則退回通用檔）
+    cube_id = f"{RUNTIME.esb_app}.{RUNTIME.esb_db}" if RUNTIME.esb_configured else None
+    try:
+        import essbase_grid as eg
+        outline = eg.outline_summary(cube=cube_id)
+    except Exception as e:  # noqa: BLE001
+        outline = ""
+        print(f"   ⚠️ 產生 outline 摘要失敗：{e}")
+    if outline:
+        outline_block = (
+            "\n\n---\n\n## 本 cube 實際維度與成員（自動產生，隨 cube 改變）\n\n"
+            "> 來源：`essbase_outline_parent_child.csv`；完整階層見 `essbase_outline.md`。\n"
+            "> 換 cube 時重抽這兩個檔，本段就會自動跟著更新。\n\n"
+            f"{outline}\n")
+    else:
+        outline_block = (
+            "\n\n---\n\n## 本 cube 維度與成員\n\n"
+            "⚠️ 找不到 `essbase_outline_parent_child.csv`，無法帶入實際 outline。"
+            "請對目前的 cube 重抽該檔放到 financial_agent/ 或 repo 根目錄。\n")
+
+    return header + guide_text + outline_block
 
 
 def run_sql_query(args: dict, file_registry: dict) -> str:

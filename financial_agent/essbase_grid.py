@@ -198,6 +198,21 @@ def outline_summary(csv_path: str | None = None, max_children: int = 12,
     return "\n".join(lines)
 
 
+def outline_dimensions(csv_path: str | None = None, cube: str | None = None) -> list[str]:
+    """回傳該 cube 的維度名稱清單（依 parent/child 檔出現順序）。找不到回 []。
+    給 agent 在 MDX 失敗時回提示「可用維度」，幫模型自我修正、別自創維度名。"""
+    path = parent_child_csv_path(csv_path, cube=cube)
+    if not path:
+        return []
+    seen: list[str] = []
+    with open(path, encoding="utf-8") as f:
+        for r in _csv.DictReader(f):
+            dim = (r.get("Dimension") or "").strip()
+            if dim and dim not in seen:
+                seen.append(dim)
+    return seen
+
+
 def aggregate_values(values_by_member: dict[str, float | None],
                      parent_map: dict[str, str]) -> dict[str, float]:
     """把「在結果集裡」的成員，依 parent/child 由下往上加總。

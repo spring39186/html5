@@ -889,6 +889,21 @@ def get_database_schema(args: dict, file_registry: dict) -> str:
     return header + guide_text + outline_block
 
 
+def _mdx_dim_hint() -> str:
+    """MDX 失敗時附的修正提示：列出本 cube 可用維度（讀對應 outline 檔），減少模型亂猜維度名。"""
+    try:
+        import essbase_grid as eg
+        cube_id = f"{RUNTIME.esb_app}.{RUNTIME.esb_db}" if RUNTIME.esb_configured else None
+        dims = eg.outline_dimensions(cube=cube_id)
+    except Exception:  # noqa: BLE001
+        dims = []
+    if not dims:
+        return ""
+    return (f"\n💡 本 cube 可用維度：{', '.join(dims)}。"
+            "維度/成員名請完全照 get_database_schema 的 outline（勿自創如 [Sector]/[Department]）；"
+            "篩年度用 [Time].[2018]，別用 [Year] 屬性維。")
+
+
 def run_sql_query(args: dict, file_registry: dict) -> str:
     """執行模型生成的 MDX 於 Essbase cube：essbase_client（已驗證連線 + essbase_grid 正確解析）
     攤成長表，完整落地為 utf-8-sig CSV（數據隔離），只回前 30 筆 Markdown 預覽 + 快取路徑標記。
@@ -911,9 +926,9 @@ def run_sql_query(args: dict, file_registry: dict) -> str:
     try:
         df = run_mdx_to_df(mdx, raw_values=True)   # raw_values：取原始數值，最乾淨
     except EssbaseError as e:
-        return f"❌ Essbase MDX 執行失敗：{e}"
+        return f"❌ Essbase MDX 執行失敗：{e}{_mdx_dim_hint()}"
     except Exception as e:  # noqa: BLE001
-        return f"❌ Essbase MDX 執行失敗：{e}"
+        return f"❌ Essbase MDX 執行失敗：{e}{_mdx_dim_hint()}"
 
     # 'value' 欄改名 AMT（前端度量欄慣例）並轉數值；丟掉全 #Missing（None）的交叉格
     if "value" in df.columns:

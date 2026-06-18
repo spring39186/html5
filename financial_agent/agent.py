@@ -969,12 +969,16 @@ def run_sql_query(args: dict, file_registry: dict) -> str:
     row_dims = list(df.attrs.get("row", []))
     cube_id = f"{RUNTIME.esb_app}.{RUNTIME.esb_db}" if RUNTIME.esb_configured else None
 
-    # 'value' 欄改名 AMT（前端度量欄慣例）並轉數值；丟掉全 #Missing（None）的交叉格
+    # 數值欄：Essbase 解析器叫它 'value'。改成中性的 'Value'，不再硬掛 Teradata 的
+    # 「AMT＝金額」——度量可能是 %／變動／比率，不一定是金額。前端改用「偵測數值欄」
+    # 而非寫死欄名，所以換名不會壞。度量本身的名字：當 Measure 維放在軸上時，其成員
+    # 已自成一欄（如 Measure=毛利率%），不必另存；放在 WHERE 時則為單一固定度量。
+    MEASURE_COL = "Value"
     if "value" in df.columns:
-        df = df.rename(columns={"value": "AMT"})
-    if "AMT" in df.columns:
-        df["AMT"] = pd.to_numeric(df["AMT"], errors="coerce")
-        df = df.dropna(subset=["AMT"])
+        df = df.rename(columns={"value": MEASURE_COL})
+    if MEASURE_COL in df.columns:
+        df[MEASURE_COL] = pd.to_numeric(df[MEASURE_COL], errors="coerce")
+        df = df.dropna(subset=[MEASURE_COL])
     if df.empty:
         return "✅ Essbase 查詢成功執行，但該條件下無資料（或全為 #Missing）。"
 
@@ -2084,7 +2088,7 @@ def _db_pivot_report(resp: AgentResponse) -> str:
     return (
         f"✅ 已為您從資料庫撈取 **{n} 筆** 明細資料並完成本地快取。\n\n"
         f"請切換至上方的 **🔀『自由拖拉樞紐分析 (Excel UI)』頁籤（Tab 3）** 進行探索"
-        f"（建議：列＝組織、欄＝月份 `YEAR_MON`、值＝`AMT` 加總、篩選＝`SCENARIO`／`CURC`）；"
+        f"（建議：列＝維度成員（如 `Sector Total`）、欄＝`Currency` 或 `Time`、值＝數值欄加總、篩選＝`Scenario` 等）；"
         f"或切到 **🗂️『企業級數據網格 (AgGrid)』** 檢視完整明細與組織層級群組。"
         f"{sql_note}"
     )

@@ -162,11 +162,24 @@ def _load_db_csv(csv_path: str, mtime: float) -> pd.DataFrame:
                     if str(c).strip() != "" and not str(c).startswith("Unnamed")
                     and str(c).strip().lower() not in ("nan", "none", "null")]]
     # pd.read_csv 預設把空字串讀成 NaN → PivotTableJS/AgGrid 會顯示成 'null' 並開一個 null 桶。
-    # 把「文字維度欄」的 NaN 填回空字串（數值欄如 AMT/MONTH_NO 維持數值，不動）。
+    # 把「文字維度欄」的 NaN 填回空字串（數值欄如 Value/MONTH_NO 維持數值，不動）。
     obj_cols = df.select_dtypes(include="object").columns
     if len(obj_cols):
         df[obj_cols] = df[obj_cols].fillna("")
     return df
+
+
+def _measure_col(df: pd.DataFrame):
+    """找出度量（數值）欄。不再硬性要求某個欄名：先認後端慣例名（新 `Value`／舊 `AMT`，
+    純為相容），都沒有就退而取最後一個數值欄→最後一欄（後端一律把數值放最後一欄）。
+    因此後端把度量欄改名（中性名或真實 Measure 名）都不會讓前端壞掉。"""
+    for name in ("Value", "AMT"):
+        if name in df.columns:
+            return name
+    nums = df.select_dtypes(include="number").columns.tolist()
+    if nums:
+        return nums[-1]
+    return df.columns[-1] if len(df.columns) else None
 
 
 @st.cache_data(show_spinner=False)
@@ -174,16 +187,18 @@ def _pivot_html(csv_path: str, mtime: float) -> str:
     """產生 PivotTableJS HTML，以 (路徑, mtime) 快取——pivot_ui 建表很貴，
     避免每次 rerun 都為每則 DB 訊息重建一次。"""
     df = _load_db_csv(csv_path, mtime).reset_index(drop=True)  # reset_index 避免 pivot 帶出 index 欄
-    # 保險：AMT 強制數值（後端已轉，但歷史舊快取可能仍是字串）→ 讓樞紐能 Sum
-    if "AMT" in df.columns:
-        df["AMT"] = pd.to_numeric(df["AMT"], errors="coerce")
+    # 保險：度量欄強制數值（後端已轉，但歷史舊快取可能仍是字串）→ 讓樞紐能 Sum
+    mcol = _measure_col(df)
+    if mcol is not None and mcol in df.columns:
+        df[mcol] = pd.to_numeric(df[mcol], errors="coerce")
     tmp = os.path.join("temp_dir", f"_pivot_{abs(hash((csv_path, mtime)))}.html")
     os.makedirs("temp_dir", exist_ok=True)
     # 注意：pivottablejs.pivot_ui 的輸出參數叫 outfile_path（不是 outfile）。
     # 傳錯名會被 **kwargs 吃掉、實際寫到預設的 pivottablejs.html，導致下方 open(tmp) 找不到檔。
-    # 預設就以「Sum of AMT」開場（aggregatorName=Sum, vals=[AMT]），使用者再自行拖維度；
-    # 否則 PivotTableJS 預設是 Count，會讓人以為 AMT 不能加總。
-    pivot_kwargs = {"aggregatorName": "Sum", "vals": ["AMT"]} if "AMT" in df.columns else {}
+    # 預設就以「Sum of <度量欄>」開場（aggregatorName=Sum, vals=[度量欄]），使用者再自行拖維度；
+    # 否則 PivotTableJS 預設是 Count，會讓人以為數值不能加總。
+    pivot_kwargs = ({"aggregatorName": "Sum", "vals": [mcol]}
+                    if mcol is not None and pd.api.types.is_numeric_dtype(df[mcol]) else {})
     pivot_ui(df, outfile_path=tmp, **pivot_kwargs)
     try:
         with open(tmp, "r", encoding="utf-8") as f:
@@ -216,21 +231,22 @@ def _render_essbase_aggrid(df: pd.DataFrame):
     org_levels = sorted((c for c in df.columns if re.fullmatch(r"ORG_L\d+", c)),
                         key=lambda c: int(c[5:]))
     group_cols = lv_levels or org_levels
+    mcol = _measure_col(df)   # 度量欄用偵測，不再寫死 AMT
     if group_cols:
         for col in group_cols:
             gob.configure_column(col, rowGroup=True, hide=True)
-        if "AMT" in df.columns:   # 父層（如 Sector Total）= 旗下明細加總
-            gob.configure_column("AMT", aggFunc="sum", enableValue=True,
+        if mcol is not None and mcol in df.columns:   # 父層（如 Sector Total）= 旗下明細加總
+            gob.configure_column(mcol, aggFunc="sum", enableValue=True,
                                  type=["numericColumn"])
         grid_opts = dict(
             groupDefaultExpanded=1,   # 預設展開第一層（總計→明細直接看到）
             autoGroupColumnDef={"headerName": "階層", "minWidth": 240,
                                 "cellRendererParams": {"suppressCount": False}})
         if lv_levels:
-            # Essbase 欄維度（非 Lv / 非 AMT，如 Currency）→ 樞紐欄：多幣別 NTD K|USD K
+            # Essbase 欄維度（非 Lv／非度量欄，如 Currency）→ 樞紐欄：多幣別 NTD K|USD K
             # 各自成欄、父層各幣別分開加總（不再混幣）。單一幣別時就只出現一個欄群組。
             pivot_cols = [c for c in df.columns
-                          if c != "AMT" and not re.fullmatch(r"Lv\d+", c)]
+                          if c != mcol and not re.fullmatch(r"Lv\d+", c)]
             for c in pivot_cols:
                 gob.configure_column(c, pivot=True)
             if pivot_cols:

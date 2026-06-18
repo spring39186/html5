@@ -40,6 +40,10 @@
 
 ## 2. MDX 基本教學
 
+> 本節一律以 **Oracle Essbase MDX** 為準（Essbase 是 Oracle 產品）。它與微軟 SSAS 的 MDX 有差異：
+> Essbase **不用** SSAS 的 `&[key]` 成員鍵語法；成員前綴只能用「單一」維度或單一祖先
+> （**不可串多個祖先**，否則 Essbase 報錯）。
+
 ### 2.1 MDX 是什麼？跟 SQL 差在哪
 MDX（MultiDimensional eXpressions）是查 OLAP cube 的語言。
 - **SQL** 面對「表 / 列 / 欄」，靠 `JOIN`、`GROUP BY`。
@@ -60,7 +64,7 @@ FROM App.Db
 WHERE ( ...切片... )         -- 選用
 ```
 - `ON COLUMNS` / `ON ROWS`：把集合擺到欄 / 列軸。
-- `FROM`：哪顆 cube（`App.Db`）。
+- `FROM`：哪顆 cube，寫 `App.Db` 或 `[App].[Db]`（如 `FROM VSalRPTH.SaleRPTA`）。
 - `WHERE`（slicer）：把「沒放上軸」的維度固定成某成員，縮小範圍。
 
 ### 2.4 WHERE（切片 / slicer）
@@ -102,15 +106,18 @@ FROM App.Db
 ```
 
 ### 2.7 註解
-- 行註解：`// ...`
-- 區塊註解：`/* ... */`
+- 區塊註解：`/* ... */`（Essbase MDX 通用）。
 
 ### 2.8 常見錯誤（請避免）
 1. **維度重複上軸**：同一維度同時放 ROWS 和 WHERE → 報錯。
-2. **忘了中括號**：成員名有空白/特殊字，一定要包 `[ ]`。
+2. **忘了中括號**：成員名有空白或以數字開頭，一定要包 `[ ]`（如 `[2018]`、`[NTD K]`）。
 3. **set 與 tuple 搞混**：多成員用 `{ }`，單一座標用 `( )`。
 4. **空軸**：每個軸至少要有成員。
 5. **成員名亂猜**：只用 §3 Outline 列出的成員；不確定就用 `Children`/`Descendants` 動態展開。
+6. **成員前綴只能一層**（Essbase 專屬）：寫 `[維度].[成員]` 或 `[單一祖先].[成員]`，
+   **不要串多個祖先**（如 `[A].[B].[C].[成員]`）——Essbase 會報錯。
+7. **別用 SSAS 語法**（Essbase 專屬）：沒有 `&[key]`、沒有 `.&[2018]` 這種鍵參照；
+   成員直接用名稱，如 `[2018]`、`[Actual]`。
 
 ---
 
@@ -183,8 +190,9 @@ WHERE ([Currency].[NTD K])
 4. 結果會自動落地 CSV 交給前端樞紐；**不需要**再寫 Python。
 
 <!--
-參考來源（MDX 基本語法）：
-- Oracle Essbase 21c — Write MDX Queries / MDX Function List（docs.oracle.com）
-- Microsoft Learn — The Basic MDX Query / Query and Slicer Axes
-- icCube MDX Tutorial、Pentaho MDX、jasonwjones MDX examples
+參考來源（一律以 Oracle Essbase 官方文件為準；Essbase 是 Oracle 產品，MDX 為 Essbase 方言）：
+- Oracle Essbase 21c《Calculation and Query Reference》— MDX Member Specification、Descendants、MDX Function List
+- Oracle Essbase 21c《Database Administrator's Guide》— Write MDX Queries
+- Oracle Essbase —《MDX Grammar Rules》
+全部位於 docs.oracle.com/en/database/other-databases/essbase/
 -->

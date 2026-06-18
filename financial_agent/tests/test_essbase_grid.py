@@ -141,6 +141,23 @@ def test_measure_is_additive() -> None:
     assert sum(1 for m in members if not measure_is_additive(m)) == 10
 
 
+def test_parse_skips_empty_members() -> None:
+    # Essbase 屬性維常回一個「空成員」結構欄/列 → 前端會變成 'null' 桶；解析時就該跳過
+    sim = {
+        "metadata": {"page": ["Measure"], "column": ["Period"], "row": ["Sector Total"]},
+        "data": [
+            ["", "01", "02", ""],          # 最後一欄標頭是空成員
+            ["Assy", "1", "2", "9"],
+            ["", "7", "8", "9"],           # 整列列成員為空
+        ],
+    }
+    recs, _ = parse_mdx_grid(sim)
+    periods = {r["Period"] for r in recs}
+    assert "" not in periods                          # 空成員欄被跳過
+    assert all(r["Sector Total"] for r in recs)       # 空成員列被跳過
+    assert periods == {"01", "02"} and len(recs) == 2  # 只剩 Assy×{01,02}
+
+
 # ── 自帶 runner ───────────────────────────────────────────────────────────
 def _run() -> int:
     tests = [v for k, v in sorted(globals().items())

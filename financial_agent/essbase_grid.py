@@ -106,9 +106,13 @@ def parse_mdx_grid(payload: dict) -> tuple[list[dict], dict]:
 
     for drow in data[n_head:]:
         row_members = [str(x) for x in drow[:n_row]]
+        if any(not m.strip() for m in row_members):       # 空成員列＝結構雜訊，跳過
+            continue
         values = drow[n_row:]
         base = {row_dims[i]: row_members[i] for i in range(n_row)}
         for j, ctup in enumerate(col_tuples):
+            if any(not str(c).strip() for c in ctup):      # 空成員欄（屬性維常見）→ 前端的 'null'，跳過
+                continue
             rec = dict(base)
             if col_dims:
                 for d, dim in enumerate(col_dims):

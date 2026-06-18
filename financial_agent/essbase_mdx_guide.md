@@ -21,7 +21,7 @@
 ## 1. Database Context & Business Mapping
 
 * **Target Cube**: `VSalRPTH.SaleRPTA` (or dynamically provided via schema).
-* **Business Scope**: Sales Reporting (銷售報告).
+* **Business Scope**: Sales data. **This whole cube IS the sales data** — user phrasings **銷售報告／銷售資料／銷售／銷售金額／營收／業績 all refer to this cube** (do not treat any of them as a missing dimension). The sales amount measure is `[Measure].[Current]`.
 * **Currency**: `[Currency].[NTD K]` (NTD thousands), `[Currency].[USD K]` (USD thousands).
 * **Data Vintage**: Limit queries to **2018** data using `[Time].[2018]` or `[Year].[2018]`.
 

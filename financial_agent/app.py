@@ -220,11 +220,22 @@ def _render_essbase_aggrid(df: pd.DataFrame):
         for col in group_cols:
             gob.configure_column(col, rowGroup=True, hide=True)
         if "AMT" in df.columns:   # 父層（如 Sector Total）= 旗下明細加總
-            gob.configure_column("AMT", aggFunc="sum", type=["numericColumn"])
-        gob.configure_grid_options(
+            gob.configure_column("AMT", aggFunc="sum", enableValue=True,
+                                 type=["numericColumn"])
+        grid_opts = dict(
             groupDefaultExpanded=1,   # 預設展開第一層（總計→明細直接看到）
             autoGroupColumnDef={"headerName": "階層", "minWidth": 240,
                                 "cellRendererParams": {"suppressCount": False}})
+        if lv_levels:
+            # Essbase 欄維度（非 Lv / 非 AMT，如 Currency）→ 樞紐欄：多幣別 NTD K|USD K
+            # 各自成欄、父層各幣別分開加總（不再混幣）。單一幣別時就只出現一個欄群組。
+            pivot_cols = [c for c in df.columns
+                          if c != "AMT" and not re.fullmatch(r"Lv\d+", c)]
+            for c in pivot_cols:
+                gob.configure_column(c, pivot=True)
+            if pivot_cols:
+                grid_opts["pivotMode"] = True
+        gob.configure_grid_options(**grid_opts)
     elif "PARENT_SITE_ORG" in df.columns and "CHILD_SITE_ORG" in df.columns:
         gob.configure_column("PARENT_SITE_ORG", rowGroup=True, hide=True)
         gob.configure_column("CHILD_SITE_ORG", rowGroup=True, hide=True)
